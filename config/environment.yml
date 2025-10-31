@@ -1,0 +1,16 @@
+name: MoK_date_predict
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python
+  - pip
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - jupyter
+  - scikit-learn
+  - packaging
+  - pip:
+    - -r requirements.txt

@@ -1,9 +1,9 @@
 # Model Configuration
 model:
-  name: "my_model"
-  architecture: "resnet50"  # Example architecture
-  input_shape: [224, 224, 3]
-  num_classes: 10
+  name: "MoK_CNN"
+  architecture: "SpatialProcessor"  # Example architecture
+  input_shape: [39, 1440, 481]
+  target: 1
 
 # Training Configuration
 training:

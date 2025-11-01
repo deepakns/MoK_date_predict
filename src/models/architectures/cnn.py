@@ -60,29 +60,31 @@ class ResSpatialProcessorBlock(nn.Module):
 
 
 class MoK_CNN_Predictor(nn.Module):
-    """ 
+    """
     Puts together the CNN model
-    Input: 13 variables (sst, t2m, msl, ttr, tcc, u1, u2, v1, v2, z1, z2, lat, lon)
-           x 3 time steps = 39 channels
+    Input: 12 variables from ERA5 dataset (5 surface vars + 6 pressure vars + land_sea_mask + lat + lon)
+           x 3 time steps (for surface and pressure vars) = 36 channels
+           Variables: ttr, msl, t2m, sst, tcc (surface) + u1, u2, v1, v2, z1, z2 (pressure) + land_sea_mask + lat, lon
+           Note: SST NaN values (over land) are filled with 0, land_sea_mask indicates ocean (1.0) vs land (0.0)
     Input spatial dimensions: 1440 x 481
 
     Architecture:
-        - Uses residual blocks to progressively increase channels (39 -> 64 -> 128)
+        - Uses residual blocks to progressively increase channels (36 -> 64 -> 128)
         - Max pooling reduces spatial dimensions by factor of 2 each stage
         - Final flatten to 200 units using an adaptive avg pooling so that arbitrary input spatial dimensions can be used
         - Two dense layers to produce single output
     """
 
-    def __init__(self):
+    def __init__(self, in_channels: int = 36):
         super().__init__() # call the constructor of nn.Module to ensure all params are tracked
 
-        # Initial convolution layer to lift 39 channels to 64 channels
-        # TO DO: Change 64 to be read from the config file
-        # group = 3 processes each variable separately as we are stacking channels each variable on each month 
-        # TO DO: Change out_channels
+        # Initial convolution layer to process input channels
+        # Note: Adjusted to use in_channels parameter for flexibility
+        # Using groups=1 for now to process all channels together
+        # TO DO: Have to implement logic to process groups of channels per variable for their three day together first
 
-        self.conv1 = nn.Conv2d(in_channels = 39, out_channels = 39, groups = 3, kernel_size = 3, padding = (1,0), padding_mode = 'circular', bias = True )
-        self.conv2 = nn.Conv2d(in_channels = 39, out_channels = 64, kernel_size = 1, bias = False )
+        self.conv1 = nn.Conv2d(in_channels = in_channels, out_channels = in_channels, groups = 1, kernel_size = 3, padding = (1,0), padding_mode = 'circular', bias = True )
+        self.conv2 = nn.Conv2d(in_channels = in_channels, out_channels = 64, kernel_size = 1, bias = False )
         self.bn1 = nn.BatchNorm2d(num_features = 64)
 
         self.relu = nn.ReLU(inplace=True) # will be reused everytime nonlinearity is needed
@@ -155,8 +157,8 @@ def create_model():
 # The utility of the following is to write a "unit test" equivalent during development
 
 def test():
-    model = MoK_CNN_Predictor()
-    input = torch.randn(2, 39, 1440, 481)
+    model = MoK_CNN_Predictor(in_channels=36)
+    input = torch.randn(2, 36, 1440, 481)
     output = model(input)
 
     print(f"Input shape: {input.shape}")

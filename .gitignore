@@ -41,6 +41,8 @@ results/models/*.pt
 results/models/*.ckpt
 *.pth
 *.pb
+results/tables/*.csv
+results/plots/*
 
 # Logs
 logs/

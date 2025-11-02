@@ -48,8 +48,8 @@ class StandardizeWithStats:
         Initialize with pre-computed statistics.
 
         Args:
-            mean: Mean for each channel, shape (channels,) or (channels, 1, 1)
-            std: Standard deviation for each channel, shape (channels,) or (channels, 1, 1)
+            mean: Mean for each channel, shape (channels,) or (channels, 1, 1) or (channels, lat, lon)
+            std: Standard deviation for each channel, shape (channels,) or (channels, 1, 1) or (channels, lat, lon)
         """
         self.mean = mean
         self.std = std
@@ -63,6 +63,98 @@ class StandardizeWithStats:
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
         """Apply standardization using the stored statistics."""
         return (tensor - self.mean) / (self.std + 1e-8)
+
+
+class NormalizeWithPrecomputedStats:
+    """
+    Normalize using precomputed statistics from training data.
+
+    This transform uses spatially-varying normalization statistics
+    (mean and std with shape: channels, lat, lon) computed from the
+    training dataset. Static channels (land_sea_mask, lat, lon) are
+    not normalized.
+
+    This is the recommended normalization approach for the ERA5 dataset.
+    """
+
+    def __init__(
+        self,
+        mean: torch.Tensor,
+        std: torch.Tensor,
+        static_channel_indices: list = None
+    ):
+        """
+        Initialize with precomputed statistics.
+
+        Args:
+            mean: Mean values, shape (channels, lat, lon)
+            std: Standard deviation values, shape (channels, lat, lon)
+            static_channel_indices: List of channel indices to skip normalization
+                                   (e.g., land_sea_mask, lat, lon)
+        """
+        if mean.shape != std.shape:
+            raise ValueError(f"mean and std must have the same shape, got {mean.shape} and {std.shape}")
+
+        if mean.dim() != 3:
+            raise ValueError(f"mean and std must be 3D tensors (channels, lat, lon), got {mean.dim()}D")
+
+        self.mean = mean
+        self.std = std
+        self.static_channel_indices = static_channel_indices or []
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Apply normalization using precomputed statistics.
+
+        Args:
+            tensor: Input tensor of shape (channels, lat, lon)
+
+        Returns:
+            Normalized tensor of same shape, with static channels unchanged
+        """
+        if tensor.shape != self.mean.shape:
+            raise ValueError(
+                f"Input tensor shape {tensor.shape} does not match "
+                f"statistics shape {self.mean.shape}"
+            )
+
+        # Create a copy to avoid modifying the input
+        normalized = tensor.clone()
+
+        # Normalize all channels except static ones
+        for channel_idx in range(tensor.shape[0]):
+            if channel_idx not in self.static_channel_indices:
+                normalized[channel_idx] = (
+                    tensor[channel_idx] - self.mean[channel_idx]
+                ) / (self.std[channel_idx] + 1e-8)
+
+        return normalized
+
+    @classmethod
+    def from_stats_file(cls, model_name: str, stats_dir=None):
+        """
+        Create transform by loading statistics from file.
+
+        Args:
+            model_name: Name of the model (used to locate saved stats)
+            stats_dir: Optional directory containing saved stats
+
+        Returns:
+            NormalizeWithPrecomputedStats instance
+
+        Example:
+            >>> transform = NormalizeWithPrecomputedStats.from_stats_file("MoK_CNN_02")
+            >>> normalized_data = transform(data_tensor)
+        """
+        from data_pipeline.preprocessing.normstats import load_normalization_stats
+
+        stats = load_normalization_stats(model_name, stats_dir=stats_dir, verbose=False)
+
+        return cls(
+            mean=stats.mean,
+            std=stats.std,
+            static_channel_indices=stats.static_channel_indices
+        )
 
 
 class MinMaxScale:

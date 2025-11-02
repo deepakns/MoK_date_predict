@@ -3,6 +3,7 @@
 from .data_transforms import (
     Normalize,
     StandardizeWithStats,
+    NormalizeWithPrecomputedStats,
     MinMaxScale,
     Compose,
     ClipValues,
@@ -14,6 +15,7 @@ from .data_transforms import (
 __all__ = [
     'Normalize',
     'StandardizeWithStats',
+    'NormalizeWithPrecomputedStats',
     'MinMaxScale',
     'Compose',
     'ClipValues',

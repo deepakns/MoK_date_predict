@@ -1,5 +1,5 @@
 import os
-from data_process import make_save_monthly_average
+from MoK_date_predict.src.data_pipeline.preprocessing.cleaners.data_process import make_save_monthly_average
 
 # call the function to make and save monthly average data
 root_dir = "/gdata2/ERA5/"

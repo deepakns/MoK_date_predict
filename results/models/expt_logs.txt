@@ -1,0 +1,6 @@
+MoK_CNN_03 -> does not use normalization
+
+MoK_CNN_04 -> uses spatially explicit normalization
+
+04p1 -> uses a different train, val split
+4p2 -> uses testing in between the years

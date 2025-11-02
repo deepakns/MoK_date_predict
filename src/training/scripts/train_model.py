@@ -44,7 +44,15 @@ sys.path.insert(0, str(src_dir))
 
 # Import project modules
 from models.architectures.cnn import MoK_CNN_Predictor, create_model
-from data_pipeline.loaders.utils import load_config_and_create_dataloaders
+from data_pipeline.loaders.utils import load_config_and_create_dataloaders, parse_year_spec
+from data_pipeline.preprocessing.normstats import (
+    compute_normalization_stats,
+    save_normalization_stats,
+    load_normalization_stats,
+    stats_exist
+)
+from data_pipeline.preprocessing.transformers import NormalizeWithPrecomputedStats
+from data_pipeline.loaders.dataset_classes.monthly_dataset import MonthlyERA5Dataset
 from training.callbacks import ModelCheckpoint, EarlyStopping, TensorBoardLogger
 
 
@@ -573,13 +581,132 @@ def main():
     print("Loading Data")
     print("=" * 80)
 
-    train_loader, val_loader, test_loader = load_config_and_create_dataloaders(
+    # First, load data WITHOUT normalization to compute statistics
+    train_loader_no_norm, val_loader, test_loader = load_config_and_create_dataloaders(
         config_path=args.config
     )
 
-    print(f"Train batches: {len(train_loader)}")
+    print(f"Train batches: {len(train_loader_no_norm)}")
     print(f"Val batches: {len(val_loader)}")
     print(f"Test batches: {len(test_loader)}")
+
+    # Check normalization strategy from config
+    data_config = config.get('data', {})
+    normalize_strategy = data_config.get('normalize_strategy', 1)  # Default to 1 for backward compatibility
+
+    print("\n" + "=" * 80)
+    print("Normalization Strategy")
+    print("=" * 80)
+    print(f"normalize_strategy: {normalize_strategy}")
+
+    normalize_transform = None
+    model_name = config['model']['name']
+
+    if normalize_strategy == 1:
+        # Strategy 1: Normalize using training data statistics
+        print("Strategy: Normalize using training data statistics (spatially-varying)")
+
+        if stats_exist(model_name):
+            print(f"Loading existing normalization statistics for '{model_name}'...")
+            norm_stats = load_normalization_stats(model_name, verbose=True)
+        else:
+            print(f"Computing normalization statistics from training data for '{model_name}'...")
+            norm_stats = compute_normalization_stats(
+                train_loader=train_loader_no_norm,
+                model_name=model_name,
+                device=device,
+                verbose=True
+            )
+            # Save statistics for future use
+            save_normalization_stats(norm_stats, verbose=True)
+
+        # Create normalization transform
+        normalize_transform = NormalizeWithPrecomputedStats(
+            mean=norm_stats.mean,
+            std=norm_stats.std,
+            static_channel_indices=norm_stats.static_channel_indices
+        )
+        print("✓ Normalization transform created")
+
+    elif normalize_strategy == 0:
+        # Strategy 0: No normalization
+        print("Strategy: No normalization (using raw data)")
+        normalize_transform = None
+
+    else:
+        # Future strategies can be added here
+        raise ValueError(
+            f"Unsupported normalize_strategy: {normalize_strategy}. "
+            f"Supported values: 0 (no normalization), 1 (training data stats)"
+        )
+
+    # Recreate dataloaders with or without normalization
+    print("\nRecreating dataloaders...")
+    train_years = parse_year_spec(data_config.get('train_years', []))
+    val_years = parse_year_spec(data_config.get('val_years', []))
+    test_years = parse_year_spec(data_config.get('test_years', []))
+
+    # Create datasets with optional normalization
+    train_dataset = MonthlyERA5Dataset(
+        data_dir=data_config.get('data_dir', '/gdata2/ERA5/monthly'),
+        years=train_years,
+        num_time_steps=data_config.get('num_time_steps', 3),
+        pressure_levels=data_config.get('pressure_levels', [0, 1]),
+        target_file=data_config.get('target_file', None),
+        transform=normalize_transform  # None if strategy=0
+    )
+
+    val_dataset = MonthlyERA5Dataset(
+        data_dir=data_config.get('data_dir', '/gdata2/ERA5/monthly'),
+        years=val_years,
+        num_time_steps=data_config.get('num_time_steps', 3),
+        pressure_levels=data_config.get('pressure_levels', [0, 1]),
+        target_file=data_config.get('target_file', None),
+        transform=normalize_transform  # None if strategy=0
+    )
+
+    test_dataset = MonthlyERA5Dataset(
+        data_dir=data_config.get('data_dir', '/gdata2/ERA5/monthly'),
+        years=test_years,
+        num_time_steps=data_config.get('num_time_steps', 3),
+        pressure_levels=data_config.get('pressure_levels', [0, 1]),
+        target_file=data_config.get('target_file', None),
+        transform=normalize_transform  # None if strategy=0
+    )
+
+    # Create dataloaders
+    batch_size = data_config.get('batch_size', 32)
+    num_workers = data_config.get('num_workers', 4)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+
+    normalization_status = "with normalization" if normalize_strategy == 1 else "without normalization"
+    print(f"✓ Dataloaders created {normalization_status}")
+    print(f"  Train: {len(train_loader)} batches, {len(train_dataset)} samples")
+    print(f"  Val:   {len(val_loader)} batches, {len(val_dataset)} samples")
+    print(f"  Test:  {len(test_loader)} batches, {len(test_dataset)} samples")
 
     # Create model
     print("\n" + "=" * 80)

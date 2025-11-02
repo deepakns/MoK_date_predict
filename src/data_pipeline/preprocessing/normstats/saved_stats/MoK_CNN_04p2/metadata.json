@@ -1,0 +1,57 @@
+{
+  "model_name": "MoK_CNN_04p2",
+  "num_samples": 46,
+  "channel_names": [
+    "ttr_t0",
+    "ttr_t1",
+    "ttr_t2",
+    "msl_t0",
+    "msl_t1",
+    "msl_t2",
+    "t2m_t0",
+    "t2m_t1",
+    "t2m_t2",
+    "sst_t0",
+    "sst_t1",
+    "sst_t2",
+    "tcc_t0",
+    "tcc_t1",
+    "tcc_t2",
+    "u1_t0",
+    "u1_t1",
+    "u1_t2",
+    "u2_t0",
+    "u2_t1",
+    "u2_t2",
+    "v1_t0",
+    "v1_t1",
+    "v1_t2",
+    "v2_t0",
+    "v2_t1",
+    "v2_t2",
+    "z1_t0",
+    "z1_t1",
+    "z1_t2",
+    "z2_t0",
+    "z2_t1",
+    "z2_t2",
+    "land_sea_mask",
+    "lat",
+    "lon"
+  ],
+  "static_channel_indices": [
+    33,
+    34,
+    35
+  ],
+  "shape": [
+    36,
+    481,
+    1440
+  ],
+  "num_channels": 36,
+  "spatial_shape": [
+    481,
+    1440
+  ]
+}

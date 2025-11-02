@@ -1,14 +1,13 @@
 # Model Configuration
 model:
-  name: "MoK_CNN_02"
+  name: "MoK_CNN_03p2"
   architecture: "SpatialProcessor"  # Example architecture
   input_shape: [36, 1440, 481]  # 36 channels: 15 surface + 18 pressure + 1 land_sea_mask + 2 coords
   target: 1
 
 # Training Configuration
 training:
-  batch_size: 32
-  epochs: 100
+  epochs: 100 # batch size is set in data section
   learning_rate: 0.001
   optimizer: "adam"
   loss: "mse"
@@ -46,7 +45,10 @@ data:
   num_workers: 2
 
   # Dataset settings
-  num_time_steps: 3  # Number of consecutive time steps to load
+  # Number of consecutive time steps to load per year (each year produces ONE sample)
+  # For example, num_time_steps: 3 means each year will use the first 3 months (e.g., Feb, Mar, Apr)
+  # as one sample with 3 time steps stacked as separate channels
+  num_time_steps: 3
   pressure_levels: [0, 1]  # Indices of pressure levels to extract
 
 

@@ -83,18 +83,18 @@ def save_predictions(
 
     with torch.no_grad():
         for data, metadata in pbar:
-            # Move data to device
+            # Move data to device for model inference
             data = data.to(device)
 
-            # Extract target from metadata
-            target = torch.stack([t for t in metadata['target']]).to(device)
+            # Extract target from metadata (keep on CPU since we only need it for saving)
+            target = torch.stack([t for t in metadata['target']])
 
             # Forward pass
             output = model(data)
 
             # Store predictions, targets, and years
             predictions.extend(output.cpu().numpy().flatten().tolist())
-            targets.extend(target.cpu().numpy().flatten().tolist())
+            targets.extend(target.numpy().flatten().tolist())
             years.extend(metadata['year'])
 
     # Create DataFrame

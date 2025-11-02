@@ -83,9 +83,9 @@ def main():
     print("=" * 80)
 
     # Example: Use years 2008-2015 for training, 2016-2017 for validation, 2018-2020 for testing
-    train_years = list(range(2008, 2016))
-    val_years = [2016, 2017]
-    test_years = list(range(2018, 2021))
+    train_years = list(range(1950, 2001))
+    val_years = list(range(2001, 2011))
+    test_years = list(range(2011, 2025))
 
     print(f"Training years: {train_years[0]}-{train_years[-1]} ({len(train_years)} years)")
     print(f"Validation years: {val_years[0]}-{val_years[-1]} ({len(val_years)} years)")
@@ -96,7 +96,7 @@ def main():
         train_years=train_years,
         val_years=val_years,
         test_years=test_years,
-        batch_size=4,
+        batch_size=10,
         num_workers=2,
         num_time_steps=3,
         pressure_levels=[0, 1]

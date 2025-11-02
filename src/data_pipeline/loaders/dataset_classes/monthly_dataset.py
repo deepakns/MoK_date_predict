@@ -22,6 +22,9 @@ class MonthlyERA5Dataset(Dataset):
     The dataset reads NetCDF files from the specified directory and creates
     tensors with time steps stacked as separate channels.
 
+    IMPORTANT: Each year produces exactly ONE data sample consisting of the
+    first num_time_steps consecutive months from that year's NetCDF file.
+
     Output tensor shape: (36, latitude, longitude) for default configuration
 
     Channel structure (36 channels total):
@@ -54,8 +57,8 @@ class MonthlyERA5Dataset(Dataset):
 
     Attributes:
         data_dir (Path): Directory containing the NetCDF files
-        years (List[int]): List of years to load
-        num_time_steps (int): Number of time steps to load (default: 3)
+        years (List[int]): List of years to load (one sample per year)
+        num_time_steps (int): Number of consecutive time steps to load per year (default: 3)
         pressure_levels (List[int]): Indices of pressure levels to use (default: [0, 1])
     """
 
@@ -71,10 +74,16 @@ class MonthlyERA5Dataset(Dataset):
         """
         Initialize the MonthlyERA5Dataset.
 
+        Each year will produce exactly ONE sample using the first num_time_steps
+        consecutive time steps from that year's NetCDF file.
+
         Args:
             data_dir: Path to directory containing NetCDF files named as <year>.nc
             years: List of years to include. If None, all available years are used.
-            num_time_steps: Number of time steps to extract from each file (default: 3)
+                   Each year produces exactly one sample.
+            num_time_steps: Number of consecutive time steps to extract from the start
+                            of each year's file (default: 3). The dataset will use
+                            time steps 0 to num_time_steps-1.
             pressure_levels: Indices of pressure levels to extract (default: [0, 1])
             transform: Optional transform to apply to the data
             target_file: Optional path to CSV file with targets (Year, DateRelJun01 columns)
@@ -132,21 +141,29 @@ class MonthlyERA5Dataset(Dataset):
         return targets
 
     def _build_index(self):
-        """Build an index of all available samples (year, time_step combinations)."""
+        """
+        Build an index of all available samples.
+
+        Each year produces exactly ONE sample, starting from time_idx=0.
+        The sample will contain num_time_steps consecutive time steps.
+        """
         for year in self.years:
             nc_file = self.data_dir / f"{year}.nc"
             if not nc_file.exists():
                 print(f"Warning: File {nc_file} not found, skipping year {year}")
                 continue
 
-            # Open dataset to get number of time steps
+            # Open dataset to verify we have enough time steps
             try:
                 with xr.open_dataset(nc_file) as ds:
                     num_times = len(ds['valid_time'])
-                    # Create samples for each valid starting point
-                    # We need num_time_steps consecutive time steps
-                    for time_idx in range(num_times - self.num_time_steps + 1):
-                        self.data_index.append((year, time_idx))
+                    # Verify we have at least num_time_steps available
+                    if num_times < self.num_time_steps:
+                        print(f"Warning: File {nc_file} has only {num_times} time steps, "
+                              f"need at least {self.num_time_steps}. Skipping year {year}")
+                        continue
+                    # Create exactly ONE sample per year, starting at time_idx=0
+                    self.data_index.append((year, 0))
             except Exception as e:
                 print(f"Warning: Error reading {nc_file}: {e}")
                 continue
@@ -260,14 +277,16 @@ class MonthlyERA5Dataset(Dataset):
         channel_names.extend(['lat', 'lon'])
 
         # Get target value if available
-        target = None
         if self.targets is not None:
             if year in self.targets:
                 target = torch.tensor([self.targets[year]], dtype=torch.float32)
             else:
-                # If target not available for this year, use NaN or raise warning
+                # If target not available for this year, use NaN
                 print(f"Warning: No target found for year {year}")
                 target = torch.tensor([float('nan')], dtype=torch.float32)
+        else:
+            # If no target file provided, use NaN as placeholder
+            target = torch.tensor([float('nan')], dtype=torch.float32)
 
         # Create metadata dictionary
         metadata = {

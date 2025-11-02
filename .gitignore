@@ -35,6 +35,9 @@ data/interim/*
 !data/processed/.gitkeep
 !data/interim/.gitkeep
 
+# Normalization statistics (computed from training data)
+src/data_pipeline/preprocessing/normstats/saved_stats/*
+
 # Models and results
 results/models/*.h5
 results/models/*.pt

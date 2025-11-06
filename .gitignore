@@ -51,6 +51,8 @@ results/plots/*
 logs/
 *.log
 tensorboard_logs/
+wandb/
+wandb/run*
 
 # IDE
 .vscode/

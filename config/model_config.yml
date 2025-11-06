@@ -1,24 +1,79 @@
 # Model Configuration
 model:
-  name: "MoK_CNN_04p2"
+  name: "MoK_CNN_16"
   architecture: "SpatialProcessor"  # Example architecture
-  input_shape: [36, 1440, 481]  # 36 channels: 15 surface + 18 pressure + 1 land_sea_mask + 2 coords
+  spatial_input_shape: [1440, 481]  # 36 channels: 15 surface + 18 pressure + 1 land_sea_mask + 2 coords
   target: 1
+  dropout_rate: 0.2  # Dropout probability for fc1, fc2, fc3, and fc4 layers
+
+  # Weight Initialization
+  weight_init:
+    enabled: true  # If false, use PyTorch's default initialization
+    method: "kaiming_normal"  # Options: kaiming_normal, kaiming_uniform, xavier_normal, xavier_uniform, orthogonal, normal, uniform, constant, zeros, ones, default
+    activation: "relu"  # Activation function type (relu, leaky_relu, tanh, sigmoid, elu, gelu)
+    bias_init: "zeros"  # Bias initialization (zeros, constant, normal, uniform)
+    bias_value: 0.0  # Value for constant bias init
+    mode: "fan_out"  # Mode for kaiming init (fan_in or fan_out)
+    gain: 1.0  # Gain for xavier/orthogonal init
+    verbose: true  # Print initialization details
 
 # Training Configuration
 training:
-  epochs: 100 # batch size is set in data section
-  learning_rate: 0.001
-  optimizer: "adam"
+  epochs: 50 # batch size is set in data section
+  learning_rate: 0.01
+  optimizer: "adamw"
   loss: "mse"
   random_seed: 42  # For reproducibility
-  
+  weight_decay: 0.0001  # L2 regularization strength (typical values: 1e-4 to 1e-5)
+
+  # Learning Rate Scheduler
+  # Options: "ReduceLROnPlateau", "StepLR", "OneCycleLR", "ExponentialLR"
+  lr_scheduler:
+    enabled: true
+    type: "OneCycleLR"  # Scheduler type
+
+    # ReduceLROnPlateau: Reduce LR when metric plateaus
+    mode: "min"  # 'min' for loss, 'max' for accuracy/R2
+    factor: 0.5  # Multiply LR by this factor when reducing (new_lr = lr * factor)
+    patience: 5  # Number of epochs with no improvement before reducing LR
+    min_lr: 1.0e-6  # Minimum learning rate
+    threshold: 1.0e-4  # Threshold for measuring improvement
+    restore_best_on_reduce: true  # If true, restore model/optimizer to best epoch when LR is reduced
+
+    # StepLR: Step decay every N epochs
+    # Example config:
+    #   type: "StepLR"
+    #   step_size: 30  # Reduce LR every 30 epochs
+    #   gamma: 0.1     # LR *= 0.1 at each step
+    # ExponentialLR: Exponential decay every epoch
+    # Example config:
+    #   type: "ExponentialLR"
+    #   gamma: 0.95  # LR *= 0.95 every epoch (lr_epoch = lr_initial × gamma^epoch)
+    step_size: 30
+    gamma: 0.1
+
+    # OneCycleLR: Cyclical learning rate with warmup and annealing
+    # Example config:
+    #   type: "OneCycleLR"
+    #   max_lr: 0.1              # Peak learning rate
+    #   pct_start: 0.3           # Percent of cycle spent increasing LR (warmup)
+    #   anneal_strategy: "cos"   # 'cos' or 'linear'
+    #   div_factor: 25.0         # initial_lr = max_lr / div_factor
+    #   final_div_factor: 1e4    # final_lr = max_lr / (div_factor * final_div_factor)
+    max_lr: 0.1
+    pct_start: 0.3
+    anneal_strategy: "cos"
+    div_factor: 25.0
+    final_div_factor: 10000.0
+
+    
+
   # Callbacks
   early_stopping:
-    enabled: true
+    enabled: false
     patience: 10
     monitor: "val_loss"
-  
+
   checkpoint:
     enabled: true
     save_best_only: true
@@ -32,29 +87,41 @@ data:
   # Path to target CSV file (Year, DateRelJun01)
   target_file: "/home/deepakns/Work/data/MoKDates.csv"
 
+  # Input variables to use from the data
+  # Surface variables: sst, ttr, tcc, t2m, msl
+  input_geo_var_surf: [sst]
+  # Pressure level variables: u, v, z
+  input_geo_var_press: []
+
+  # Optional static channels (set to false to exclude)
+  include_lat: false
+  include_lon: false
+  include_landsea: false
+
   # Year specifications can be:
   # - Single years: 1962, 1965
   # - Ranges: "1950:1960" (inclusive, both start and end)
   # - Mix of both: ["1950:1960", 1962, "1964:2000"]
-  train_years: ["1950:1960", "1966:1990", "1996:2005"]
-  val_years: ["2011:2024"]
-  test_years: ["1961:1965", "1991:1995"]
+  train_years: ["1951:2000"]
+  val_years: ["2001:2010"]
+  test_years: ["2011:2024"]
 
   # DataLoader settings
-  batch_size: 10
+  batch_size: 1
   num_workers: 2
 
   # Dataset settings
-  # Number of consecutive time steps to load per year (each year produces ONE sample)
-  # For example, num_time_steps: 3 means each year will use the first 3 months (e.g., Feb, Mar, Apr)
-  # as one sample with 3 time steps stacked as separate channels
-  num_time_steps: 3
+  # Time step indices to load per year (each year produces ONE sample)
+  # For example, time_steps: [0, 1, 2] will load the first 3 months (e.g., Feb, Mar, Apr)
+  # Non-consecutive steps are allowed: [0, 2, 4] will load months 1, 3, 5
+  # Each time step is stacked as a separate channel
+  time_steps: [1, 2]
   pressure_levels: [0, 1]  # Indices of pressure levels to extract
 
   # Normalization strategy
   # 0: No normalization (raw data)
   # 1: Normalize using training data statistics (spatially-varying mean/std)
-  # Future: Additional strategies can be added (e.g., 2: per-sample normalization, etc.)
+  # Future: Additional strategies can be added
   normalize_strategy: 1
 
   augmentation:
@@ -67,5 +134,33 @@ data:
 # Logging
 logging:
   log_dir: "logs"
-  tensorboard: true
-  save_frequency: 1  # Save every N epochs
+  tensorboard: true  # Keep TensorBoard enabled
+  save_frequency: 1
+
+  # Weights & Biases Configuration - ENABLED
+  wandb:
+    enabled: true  # ← Set to true to enable W&B
+
+    # Basic Settings
+    project: "MoK_date_predict"  # W&B project name
+    entity: null  # Your W&B username or team (null = use default)
+    name: null  # Run name (null = auto-generate from model name)
+
+    # Organization
+    tags:  # Tags for organizing experiments
+      - "with-scheduler"
+      - "lr-0.01"
+      - "batch_size-1"
+      - "dropout-0.2"
+      - "initial-kaiming-normal"
+    notes: "Training with OneCycleLR"  # Experiment notes
+
+    # Logging Options
+    log_model: true  # Save best model checkpoint to W&B
+    log_predictions: false  # Don't log prediction tables (saves time/space)
+    log_gradients: false  # Don't log gradient histograms (saves time)
+
+    # Advanced Options
+    watch_model: false  # Don't use wandb.watch() (can slow training)
+    watch_log: "gradients"  # What to log if watch_model is true
+    watch_freq: 100  # How often to log if watch_model is true

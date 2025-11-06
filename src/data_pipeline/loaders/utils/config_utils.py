@@ -136,32 +136,62 @@ def load_config_and_create_dataloaders(
     target_file = data_config.get('target_file', None)
     batch_size = data_config.get('batch_size', 32)
     num_workers = data_config.get('num_workers', 4)
-    num_time_steps = data_config.get('num_time_steps', 3)
+
+    # Handle time_steps (new format) or num_time_steps (backward compatibility)
+    time_steps = data_config.get('time_steps', None)
+    num_time_steps = data_config.get('num_time_steps', None)
     pressure_levels = data_config.get('pressure_levels', [0, 1])
+
+    # Get input variable lists
+    input_geo_var_surf = data_config.get('input_geo_var_surf', None)
+    input_geo_var_press = data_config.get('input_geo_var_press', None)
+
+    # Get optional static channel flags
+    include_lat = data_config.get('include_lat', True)
+    include_lon = data_config.get('include_lon', True)
+    include_landsea = data_config.get('include_landsea', True)
 
     # Create datasets
     train_dataset = MonthlyERA5Dataset(
         data_dir=data_dir,
         years=train_years,
-        num_time_steps=num_time_steps,
+        time_steps=time_steps,
+        num_time_steps=num_time_steps,  # Fallback for backward compatibility
         pressure_levels=pressure_levels,
-        target_file=target_file
+        target_file=target_file,
+        input_geo_var_surf=input_geo_var_surf,
+        input_geo_var_press=input_geo_var_press,
+        include_lat=include_lat,
+        include_lon=include_lon,
+        include_landsea=include_landsea
     )
 
     val_dataset = MonthlyERA5Dataset(
         data_dir=data_dir,
         years=val_years,
-        num_time_steps=num_time_steps,
+        time_steps=time_steps,
+        num_time_steps=num_time_steps,  # Fallback for backward compatibility
         pressure_levels=pressure_levels,
-        target_file=target_file
+        target_file=target_file,
+        input_geo_var_surf=input_geo_var_surf,
+        input_geo_var_press=input_geo_var_press,
+        include_lat=include_lat,
+        include_lon=include_lon,
+        include_landsea=include_landsea
     )
 
     test_dataset = MonthlyERA5Dataset(
         data_dir=data_dir,
         years=test_years,
-        num_time_steps=num_time_steps,
+        time_steps=time_steps,
+        num_time_steps=num_time_steps,  # Fallback for backward compatibility
         pressure_levels=pressure_levels,
-        target_file=target_file
+        target_file=target_file,
+        input_geo_var_surf=input_geo_var_surf,
+        input_geo_var_press=input_geo_var_press,
+        include_lat=include_lat,
+        include_lon=include_lon,
+        include_landsea=include_landsea
     )
 
     # Create dataloaders

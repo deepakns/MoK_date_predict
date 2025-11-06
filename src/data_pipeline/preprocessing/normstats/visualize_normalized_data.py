@@ -189,7 +189,10 @@ def main():
     data_config = config.get('data', {})
     data_dir = data_config.get('data_dir', '/gdata2/ERA5/monthly')
     target_file = data_config.get('target_file', None)
-    num_time_steps = data_config.get('num_time_steps', 3)
+
+    # Handle time_steps (new format) or num_time_steps (backward compatibility)
+    time_steps = data_config.get('time_steps', None)
+    num_time_steps = data_config.get('num_time_steps', None)
     pressure_levels = data_config.get('pressure_levels', [0, 1])
 
     # Determine years to plot
@@ -257,7 +260,8 @@ def main():
         dataset_raw = MonthlyERA5Dataset(
             data_dir=data_dir,
             years=[year],
-            num_time_steps=num_time_steps,
+            time_steps=time_steps,
+            num_time_steps=num_time_steps,  # Fallback for backward compatibility
             pressure_levels=pressure_levels,
             target_file=target_file,
             transform=None  # No normalization
@@ -267,7 +271,8 @@ def main():
         dataset_norm = MonthlyERA5Dataset(
             data_dir=data_dir,
             years=[year],
-            num_time_steps=num_time_steps,
+            time_steps=time_steps,
+            num_time_steps=num_time_steps,  # Fallback for backward compatibility
             pressure_levels=pressure_levels,
             target_file=target_file,
             transform=normalize_transform
@@ -278,8 +283,11 @@ def main():
             continue
 
         # Get the data
-        raw_data, raw_metadata = dataset_raw[0]
-        norm_data, norm_metadata = dataset_norm[0]
+        raw_data, raw_target = dataset_raw[0]
+        norm_data, norm_target = dataset_norm[0]
+
+        # Get metadata separately
+        raw_metadata = dataset_raw.get_metadata(0)
 
         # Extract land_sea_mask if available
         land_sea_mask = None

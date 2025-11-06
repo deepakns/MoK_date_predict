@@ -50,11 +50,15 @@ def main():
         print("\n" + "=" * 80)
         print("Sample Data:")
         print("=" * 80)
-        data, metadata = dataset[0]
-        print(f"Shape: {data.shape}")
+        data, target = dataset[0]
+        print(f"Data shape: {data.shape}")
         print(f"  - Channels: {data.shape[0]}")
         print(f"  - Latitude points: {data.shape[1]}")
         print(f"  - Longitude points: {data.shape[2]}")
+        print(f"\nTarget: {target}")
+
+        # Get metadata separately
+        metadata = dataset.get_metadata(0)
         print(f"\nMetadata:")
         for key, value in metadata.items():
             if key != 'channel_names':  # Skip channel_names for brevity
@@ -111,11 +115,18 @@ def main():
     print("Example 3: Iterating Through a Batch")
     print("=" * 80)
 
-    for batch_idx, (batch_data, batch_metadata) in enumerate(train_loader):
+    for batch_idx, (batch_data, batch_target) in enumerate(train_loader):
         print(f"Batch {batch_idx}:")
-        print(f"  Shape: {batch_data.shape}  # (batch_size, channels, lat, lon)")
+        print(f"  Data shape: {batch_data.shape}  # (batch_size, channels, lat, lon)")
+        print(f"  Target shape: {batch_target.shape}")
         print(f"  Memory: {batch_data.element_size() * batch_data.nelement() / 1024**2:.2f} MB")
-        print(f"  Years in batch: {batch_metadata['year']}")
+
+        # Get years from metadata if needed
+        if batch_idx == 0:
+            batch_size = batch_data.size(0)
+            batch_years = [train_loader.dataset.get_metadata(i)['year']
+                          for i in range(batch_size)]
+            print(f"  Years in batch: {batch_years}")
 
         if batch_idx == 0:  # Only show first batch
             break
@@ -134,7 +145,7 @@ def main():
     )
 
     if len(dataset_with_transform) > 0:
-        data_transformed, _ = dataset_with_transform[0]
+        data_transformed, target_transformed = dataset_with_transform[0]
         print(f"With Normalize transform:")
         print(f"  Shape: {data_transformed.shape}")
         print(f"  Mean per channel (should be ~0): {data_transformed.mean(dim=(1,2)).mean():.6f}")
@@ -156,7 +167,7 @@ def main():
     )
 
     if len(dataset_composed) > 0:
-        data_composed, _ = dataset_composed[0]
+        data_composed, target_composed = dataset_composed[0]
         print(f"  Shape: {data_composed.shape}")
         print(f"  Min value (should be 0): {data_composed.min():.6f}")
         print(f"  Max value (should be 1): {data_composed.max():.6f}")

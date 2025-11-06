@@ -115,26 +115,16 @@ def compute_normalization_stats(
     # Create progress bar if verbose
     iterator = tqdm(train_loader, desc="Computing normalization stats") if verbose else train_loader
 
-    for batch_idx, (data, metadata) in enumerate(iterator):
+    for batch_idx, (data, target) in enumerate(iterator):
         # Move data to device
         data = data.to(device)  # Shape: (batch_size, channels, lat, lon)
 
-        # Get channel names from first batch
+        # Get channel names from first batch by accessing dataset metadata
         if channel_names is None:
-            # PyTorch's default collate function transposes list-of-lists structure
-            # metadata['channel_names'] becomes a list where each element is a tuple
-            # containing that channel's name from each batch item:
-            # [('ttr_t0',), ('ttr_t1',), ..., ('lon',)]
-            # We need to extract the first element from each tuple to rebuild the channel list
-            if isinstance(metadata['channel_names'], list) and len(metadata['channel_names']) > 0:
-                if isinstance(metadata['channel_names'][0], (tuple, list)):
-                    # Collated format: extract first element from each tuple
-                    channel_names = [names[0] for names in metadata['channel_names']]
-                else:
-                    # Single batch item, already a list of strings
-                    channel_names = metadata['channel_names']
-            else:
-                channel_names = metadata['channel_names']
+            # Access the dataset directly to get channel names
+            dataset = train_loader.dataset
+            channel_info = dataset.get_channel_info()
+            channel_names = channel_info['channel_names']
 
             # Verify we got the right number of channels
             if verbose:

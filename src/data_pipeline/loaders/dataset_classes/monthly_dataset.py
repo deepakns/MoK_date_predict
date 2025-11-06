@@ -66,37 +66,90 @@ class MonthlyERA5Dataset(Dataset):
         self,
         data_dir: str = "/gdata2/ERA5/monthly",
         years: Optional[List[int]] = None,
-        num_time_steps: int = 3,
+        time_steps: Optional[List[int]] = None,
+        num_time_steps: Optional[int] = None,  # Deprecated, kept for backward compatibility
         pressure_levels: Optional[List[int]] = None,
         transform: Optional[callable] = None,
         target_file: Optional[str] = None,
+        input_geo_var_surf: Optional[List[str]] = None,
+        input_geo_var_press: Optional[List[str]] = None,
+        include_lat: bool = True,
+        include_lon: bool = True,
+        include_landsea: bool = True,
     ):
         """
         Initialize the MonthlyERA5Dataset.
 
-        Each year will produce exactly ONE sample using the first num_time_steps
-        consecutive time steps from that year's NetCDF file.
+        Each year will produce exactly ONE sample using the specified time step indices
+        from that year's NetCDF file.
 
         Args:
             data_dir: Path to directory containing NetCDF files named as <year>.nc
             years: List of years to include. If None, all available years are used.
                    Each year produces exactly one sample.
-            num_time_steps: Number of consecutive time steps to extract from the start
-                            of each year's file (default: 3). The dataset will use
-                            time steps 0 to num_time_steps-1.
+            time_steps: List of time step indices to extract (e.g., [0, 1, 2] for first 3 months,
+                       or [0, 2, 4] for months 1, 3, 5). If None, defaults to [0, 1, 2].
+            num_time_steps: (Deprecated) Number of consecutive time steps. Use time_steps instead.
             pressure_levels: Indices of pressure levels to extract (default: [0, 1])
             transform: Optional transform to apply to the data
             target_file: Optional path to CSV file with targets (Year, DateRelJun01 columns)
+            input_geo_var_surf: List of surface variables to load (e.g., ['sst', 'ttr', 'tcc', 't2m']).
+                               If None, defaults to all available: ['ttr', 'msl', 't2m', 'sst', 'tcc']
+            input_geo_var_press: List of pressure level variables to load (e.g., ['u', 'v', 'z']).
+                                If None, defaults to all available: ['u', 'v', 'z']
+            include_lat: Whether to include latitude channel (default: True)
+            include_lon: Whether to include longitude channel (default: True)
+            include_landsea: Whether to include land-sea mask channel (default: True)
         """
         self.data_dir = Path(data_dir)
-        self.num_time_steps = num_time_steps
+
+        # Handle time_steps parameter (with backward compatibility)
+        if time_steps is not None:
+            self.time_steps = sorted(time_steps)  # Ensure sorted for validation
+        elif num_time_steps is not None:
+            # Backward compatibility: convert num_time_steps to time_steps
+            self.time_steps = list(range(num_time_steps))
+        else:
+            self.time_steps = [0, 1, 2]  # Default
+
+        self.num_time_steps = len(self.time_steps)  # For compatibility with existing code
         self.pressure_levels = pressure_levels if pressure_levels is not None else [0, 1]
         self.transform = transform
         self.target_file = target_file
 
-        # Variable names in the NetCDF files
-        self.surface_vars = ['ttr', 'msl', 't2m', 'sst', 'tcc']
-        self.pressure_vars = ['u', 'v', 'z']
+        # Store flags for optional static channels
+        self.include_lat = include_lat
+        self.include_lon = include_lon
+        self.include_landsea = include_landsea
+
+        # Define all available variables
+        self.all_surface_vars = ['ttr', 'msl', 't2m', 'sst', 'tcc']
+        self.all_pressure_vars = ['u', 'v', 'z']
+
+        # Set variables to use based on config or defaults
+        if input_geo_var_surf is not None:
+            # Validate that requested variables are in the available list
+            invalid_vars = set(input_geo_var_surf) - set(self.all_surface_vars)
+            if invalid_vars:
+                raise ValueError(
+                    f"Invalid surface variables requested: {invalid_vars}. "
+                    f"Available variables: {self.all_surface_vars}"
+                )
+            self.surface_vars = input_geo_var_surf
+        else:
+            self.surface_vars = self.all_surface_vars
+
+        if input_geo_var_press is not None:
+            # Validate that requested variables are in the available list
+            invalid_vars = set(input_geo_var_press) - set(self.all_pressure_vars)
+            if invalid_vars:
+                raise ValueError(
+                    f"Invalid pressure variables requested: {invalid_vars}. "
+                    f"Available variables: {self.all_pressure_vars}"
+                )
+            self.pressure_vars = input_geo_var_press
+        else:
+            self.pressure_vars = self.all_pressure_vars
 
         # Load target data if provided
         self.targets: Optional[Dict[int, float]] = None
@@ -144,9 +197,10 @@ class MonthlyERA5Dataset(Dataset):
         """
         Build an index of all available samples.
 
-        Each year produces exactly ONE sample, starting from time_idx=0.
-        The sample will contain num_time_steps consecutive time steps.
+        Each year produces exactly ONE sample using the specified time_steps indices.
         """
+        max_time_idx = max(self.time_steps) if self.time_steps else 0
+
         for year in self.years:
             nc_file = self.data_dir / f"{year}.nc"
             if not nc_file.exists():
@@ -157,10 +211,10 @@ class MonthlyERA5Dataset(Dataset):
             try:
                 with xr.open_dataset(nc_file) as ds:
                     num_times = len(ds['valid_time'])
-                    # Verify we have at least num_time_steps available
-                    if num_times < self.num_time_steps:
+                    # Verify we have all required time step indices available
+                    if num_times <= max_time_idx:
                         print(f"Warning: File {nc_file} has only {num_times} time steps, "
-                              f"need at least {self.num_time_steps}. Skipping year {year}")
+                              f"need index {max_time_idx} (time_steps={self.time_steps}). Skipping year {year}")
                         continue
                     # Create exactly ONE sample per year, starting at time_idx=0
                     self.data_index.append((year, 0))
@@ -172,7 +226,7 @@ class MonthlyERA5Dataset(Dataset):
         """Return the total number of samples in the dataset."""
         return len(self.data_index)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, dict]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get a sample from the dataset.
 
@@ -180,10 +234,11 @@ class MonthlyERA5Dataset(Dataset):
             idx: Index of the sample
 
         Returns:
-            Tuple of (data_tensor, metadata_dict) where:
+            Tuple of (data_tensor, target_tensor) where:
                 - data_tensor: Tensor of shape (channels, lat, lon)
                   channels = 36 (5 surface vars × 3 time steps + 3 pressure vars × 2 levels × 3 time steps + land_sea_mask + lat + lon)
-                - metadata_dict: Dictionary containing year, time_idx, and other info
+                - target_tensor: Tensor of shape (1,) containing the target value (DateRelJun01)
+                  Will be NaN if no target file was provided or target not found for this year
         """
         year, time_idx = self.data_index[idx]
         nc_file = self.data_dir / f"{year}.nc"
@@ -191,8 +246,24 @@ class MonthlyERA5Dataset(Dataset):
         # Load the NetCDF file
         ds = xr.open_dataset(nc_file)
 
-        # Extract time slice
-        time_slice = slice(time_idx, time_idx + self.num_time_steps)
+        # Validate that all requested variables exist in the dataset
+        missing_vars = []
+        for var_name in self.surface_vars:
+            if var_name not in ds:
+                missing_vars.append(var_name)
+        for var_name in self.pressure_vars:
+            if var_name not in ds:
+                missing_vars.append(var_name)
+
+        if missing_vars:
+            ds.close()
+            raise SystemExit(
+                f"ERROR: Input data does not match with the provided input_geo_var.\n"
+                f"Missing variables in {nc_file}: {missing_vars}\n"
+                f"Requested surface variables: {self.surface_vars}\n"
+                f"Requested pressure variables: {self.pressure_vars}\n"
+                f"Available variables in dataset: {list(ds.data_vars)}"
+            )
 
         # List to hold all channels
         all_channels = []
@@ -200,33 +271,31 @@ class MonthlyERA5Dataset(Dataset):
         # Create land-sea mask from SST (before filling NaNs)
         # Use first time step to create mask (mask is constant across time)
         land_sea_mask = None
-        if 'sst' in ds:
-            sst_data = ds['sst'].isel(valid_time=time_slice).values  # (time, lat, lon)
+        if 'sst' in self.surface_vars and 'sst' in ds:
+            # Extract data for all required time steps
+            sst_data = ds['sst'].isel(valid_time=self.time_steps).values  # (len(time_steps), lat, lon)
             # Create mask: 1.0 where SST is valid (ocean), 0.0 where NaN (land)
             land_sea_mask = (~np.isnan(sst_data[0])).astype(np.float32)  # (lat, lon)
 
         # Extract surface variables: shape (time, lat, lon)
-        # Stack each time step as a separate channel
+        # Stack each specified time step as a separate channel
         for var_name in self.surface_vars:
-            if var_name not in ds:
-                raise ValueError(f"Variable {var_name} not found in {nc_file}")
-            var_data = ds[var_name].isel(valid_time=time_slice).values  # (time, lat, lon)
+            # Extract only the specified time step indices
+            var_data = ds[var_name].isel(valid_time=self.time_steps).values  # (len(time_steps), lat, lon)
 
             # Fill NaN values for SST with 0
             if var_name == 'sst':
                 var_data = np.nan_to_num(var_data, nan=0.0)
 
             # Add each time step as a separate channel
-            for t in range(self.num_time_steps):
-                all_channels.append(var_data[t])  # (lat, lon)
+            for t_idx in range(len(self.time_steps)):
+                all_channels.append(var_data[t_idx])  # (lat, lon)
 
         # Extract pressure level variables: shape (time, pressure, lat, lon)
         # For each variable and each pressure level, stack time steps as channels
         for var_name in self.pressure_vars:
-            if var_name not in ds:
-                raise ValueError(f"Variable {var_name} not found in {nc_file}")
-            # Get data for the specified time and pressure levels
-            var_data_full = ds[var_name].isel(valid_time=time_slice).values  # (time, pressure, lat, lon)
+            # Get data for the specified time step indices
+            var_data_full = ds[var_name].isel(valid_time=self.time_steps).values  # (len(time_steps), pressure, lat, lon)
 
             # Extract specified pressure levels
             for p_level in self.pressure_levels:
@@ -235,22 +304,25 @@ class MonthlyERA5Dataset(Dataset):
                         f"Pressure level {p_level} out of range for variable {var_name}"
                     )
                 # Add each time step as a separate channel for this pressure level
-                for t in range(self.num_time_steps):
-                    all_channels.append(var_data_full[t, p_level, :, :])  # (lat, lon)
+                for t_idx in range(len(self.time_steps)):
+                    all_channels.append(var_data_full[t_idx, p_level, :, :])  # (lat, lon)
 
-        # Get lat/lon coordinates
-        lat = ds['latitude'].values
-        lon = ds['longitude'].values
-
-        # Create coordinate grids (single 2D grids, not repeated for time)
-        lon_grid, lat_grid = np.meshgrid(lon, lat)
-
-        # Add land-sea mask (if available)
-        if land_sea_mask is not None:
+        # Add optional static channels based on flags
+        # Add land-sea mask (if available and enabled)
+        if self.include_landsea and land_sea_mask is not None:
             all_channels.append(land_sea_mask)  # (lat, lon)
 
-        all_channels.append(lat_grid)  # (lat, lon)
-        all_channels.append(lon_grid)  # (lat, lon)
+        # Add lat/lon coordinates if enabled
+        if self.include_lat or self.include_lon:
+            lat = ds['latitude'].values
+            lon = ds['longitude'].values
+            # Create coordinate grids (single 2D grids, not repeated for time)
+            lon_grid, lat_grid = np.meshgrid(lon, lat)
+
+            if self.include_lat:
+                all_channels.append(lat_grid)  # (lat, lon)
+            if self.include_lon:
+                all_channels.append(lon_grid)  # (lat, lon)
 
         # Convert to numpy array and then to torch tensor
         # Shape: (channels, lat, lon)
@@ -260,7 +332,7 @@ class MonthlyERA5Dataset(Dataset):
         # Close the dataset
         ds.close()
 
-        # Create channel names
+        # Create channel names (kept for backward compatibility, but not used in tensor)
         channel_names = []
         # Surface variables
         for var in self.surface_vars:
@@ -271,10 +343,13 @@ class MonthlyERA5Dataset(Dataset):
             for p_idx in range(len(self.pressure_levels)):
                 for t in range(self.num_time_steps):
                     channel_names.append(f"{var}{p_idx+1}_t{t}")
-        # Static fields
-        if land_sea_mask is not None:
+        # Static fields (conditionally added based on flags)
+        if self.include_landsea and land_sea_mask is not None:
             channel_names.append('land_sea_mask')
-        channel_names.extend(['lat', 'lon'])
+        if self.include_lat:
+            channel_names.append('lat')
+        if self.include_lon:
+            channel_names.append('lon')
 
         # Get target value if available
         if self.targets is not None:
@@ -288,21 +363,56 @@ class MonthlyERA5Dataset(Dataset):
             # If no target file provided, use NaN as placeholder
             target = torch.tensor([float('nan')], dtype=torch.float32)
 
-        # Create metadata dictionary
-        metadata = {
-            'year': year,
-            'time_idx': time_idx,
-            'num_time_steps': self.num_time_steps,
-            'shape': data_tensor.shape,
-            'channel_names': channel_names,
-            'target': target
-        }
-
         # Apply transform if specified
         if self.transform:
             data_tensor = self.transform(data_tensor)
 
-        return data_tensor, metadata
+        return data_tensor, target
+
+    def get_metadata(self, idx: int) -> dict:
+        """
+        Get metadata for a specific sample without loading the data.
+
+        Args:
+            idx: Index of the sample
+
+        Returns:
+            Dictionary containing year, time_idx, channel_names, and other info
+        """
+        year, time_idx = self.data_index[idx]
+
+        # Create channel names
+        channel_names = []
+        # Surface variables
+        for var in self.surface_vars:
+            for t in range(self.num_time_steps):
+                channel_names.append(f"{var}_t{t}")
+        # Pressure variables
+        for var in self.pressure_vars:
+            for p_idx in range(len(self.pressure_levels)):
+                for t in range(self.num_time_steps):
+                    channel_names.append(f"{var}{p_idx+1}_t{t}")
+        # Static fields (conditionally added based on flags)
+        if self.include_landsea:
+            channel_names.append('land_sea_mask')
+        if self.include_lat:
+            channel_names.append('lat')
+        if self.include_lon:
+            channel_names.append('lon')
+
+        metadata = {
+            'year': year,
+            'time_idx': time_idx,
+            'num_time_steps': self.num_time_steps,
+            'channel_names': channel_names,
+            'time_steps': self.time_steps,
+        }
+
+        # Add target if available
+        if self.targets is not None and year in self.targets:
+            metadata['target'] = self.targets[year]
+
+        return metadata
 
     def get_channel_info(self) -> dict:
         """
@@ -313,20 +423,25 @@ class MonthlyERA5Dataset(Dataset):
         """
         channel_names = []
 
-        # Surface variables (each var × num_time_steps)
+        # Surface variables (each var × len(time_steps))
+        # Use actual time step indices in channel names
         for var in self.surface_vars:
-            for t in range(self.num_time_steps):
-                channel_names.append(f"{var}_t{t}")
+            for t_idx in self.time_steps:
+                channel_names.append(f"{var}_t{t_idx}")
 
-        # Pressure level variables (each var × num_pressure_levels × num_time_steps)
+        # Pressure level variables (each var × num_pressure_levels × len(time_steps))
         for var in self.pressure_vars:
             for p_idx in range(len(self.pressure_levels)):
-                for t in range(self.num_time_steps):
-                    channel_names.append(f"{var}{p_idx + 1}_t{t}")
+                for t_idx in self.time_steps:
+                    channel_names.append(f"{var}{p_idx + 1}_t{t_idx}")
 
-        # Static fields
-        channel_names.append('land_sea_mask')
-        channel_names.extend(['lat', 'lon'])
+        # Static fields (conditionally added based on flags)
+        if self.include_landsea:
+            channel_names.append('land_sea_mask')
+        if self.include_lat:
+            channel_names.append('lat')
+        if self.include_lon:
+            channel_names.append('lon')
 
         return {
             'channel_names': channel_names,
@@ -334,7 +449,8 @@ class MonthlyERA5Dataset(Dataset):
             'surface_vars': self.surface_vars,
             'pressure_vars': self.pressure_vars,
             'pressure_levels': self.pressure_levels,
-            'num_time_steps': self.num_time_steps
+            'time_steps': self.time_steps,
+            'num_time_steps': self.num_time_steps  # Kept for backward compatibility
         }
 
 
@@ -420,8 +536,12 @@ if __name__ == "__main__":
 
     # Get first sample
     if len(dataset) > 0:
-        data, metadata = dataset[0]
+        data, target = dataset[0]
         print(f"\nFirst sample:")
-        print(f"  Shape: {data.shape}")
-        print(f"  Metadata: {metadata}")
+        print(f"  Data shape: {data.shape}")
+        print(f"  Target: {target}")
         print(f"  Data range: [{data.min():.2f}, {data.max():.2f}]")
+
+        # Get metadata separately if needed
+        metadata = dataset.get_metadata(0)
+        print(f"  Metadata: {metadata}")

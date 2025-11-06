@@ -261,7 +261,7 @@ Both scripts require:
 
 **"No data found for year X"**
 - Check that the year's NetCDF file exists in the data directory
-- Verify the year has enough time steps (needs at least `num_time_steps`)
+- Verify the year has enough time steps (needs all indices specified in `time_steps`)
 
 **Empty plots or all zeros**
 - Check if the channel is in the static channels list

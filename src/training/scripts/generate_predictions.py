@@ -61,7 +61,7 @@ def save_predictions(
     device: torch.device,
     split_name: str,
     output_path: Path
-) -> None:
+) -> Dict[str, float]:
     """
     Generate predictions and save to CSV file.
 
@@ -71,6 +71,9 @@ def save_predictions(
         device: Device to use
         split_name: Name of the split (train/val/test)
         output_path: Path to save CSV file
+
+    Returns:
+        Dictionary containing evaluation metrics (target_mean, target_std, mae, rmse, r2)
     """
     model.eval()
 
@@ -109,16 +112,40 @@ def save_predictions(
     # Sort by year
     df = df.sort_values('Year').reset_index(drop=True)
 
+    # Calculate statistics
+    target_mean = df['Target'].mean()
+    target_std = df['Target'].std()
+    mae = df['Absolute_Error'].mean()
+    rmse = (df['Error'] ** 2).mean() ** 0.5
+
+    # Calculate R² score
+    # R² = 1 - (SS_res / SS_tot)
+    # where SS_res = sum of squared residuals, SS_tot = total sum of squares
+    ss_res = (df['Error'] ** 2).sum()
+    ss_tot = ((df['Target'] - target_mean) ** 2).sum()
+    r2_score = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
     # Save to CSV
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
     print(f"✓ Saved predictions to: {output_path}")
 
     # Print summary statistics
-    mae = df['Absolute_Error'].mean()
-    rmse = (df['Error'] ** 2).mean() ** 0.5
-    print(f"  MAE: {mae:.4f}")
+    print(f"  Target Mean: {target_mean:.4f}")
+    print(f"  Target Std:  {target_std:.4f}")
+    print(f"  MAE:  {mae:.4f}")
     print(f"  RMSE: {rmse:.4f}")
+    print(f"  R²:   {r2_score:.4f}")
+
+    # Return statistics
+    return {
+        'target_mean': target_mean,
+        'target_std': target_std,
+        'mae': mae,
+        'rmse': rmse,
+        'r2': r2_score,
+        'num_samples': len(df)
+    }
 
 
 def generate_predictions_from_checkpoint(
@@ -168,17 +195,31 @@ def generate_predictions_from_checkpoint(
     print(f"Val batches: {len(val_loader)}")
     print(f"Test batches: {len(test_loader)}")
 
+    # Get channel information from dataset to determine in_channels dynamically
+    # Access the dataset from the dataloader
+    train_dataset = train_loader.dataset
+    channel_info = train_dataset.get_channel_info()
+    in_channels = channel_info['num_channels']
+
+    print(f"\nDataset configuration:")
+    print(f"  Total channels: {in_channels}")
+    print(f"  Time steps: {channel_info['time_steps']}")
+
+    # Get spatial dimensions from first sample
+    sample_data, _ = train_dataset[0]
+    _, spatial_h, spatial_w = sample_data.shape
+
     # Create model
     print("\n" + "=" * 80)
     print("Creating Model")
     print("=" * 80)
 
-    model = MoK_CNN_Predictor(in_channels=36)
+    model = MoK_CNN_Predictor(in_channels=in_channels)
     model = model.to(device)
 
-    # Initialize lazy modules
+    # Initialize lazy modules with correct dimensions
     print("Initializing lazy modules...")
-    dummy_input = torch.randn(1, 36, 1440, 481).to(device)
+    dummy_input = torch.randn(1, in_channels, spatial_h, spatial_w).to(device)
     with torch.no_grad():
         _ = model(dummy_input)
     print("Lazy modules initialized.")
@@ -217,8 +258,8 @@ def generate_predictions_from_checkpoint(
     project_root = src_dir.parent
     results_dir = project_root / 'results' / 'tables'
 
-    # Save predictions for all splits
-    save_predictions(
+    # Save predictions for all splits and collect statistics
+    train_stats = save_predictions(
         model=model,
         data_loader=train_loader,
         device=device,
@@ -226,7 +267,7 @@ def generate_predictions_from_checkpoint(
         output_path=results_dir / f'{model_name}_train_predictions.csv'
     )
 
-    save_predictions(
+    val_stats = save_predictions(
         model=model,
         data_loader=val_loader,
         device=device,
@@ -234,13 +275,34 @@ def generate_predictions_from_checkpoint(
         output_path=results_dir / f'{model_name}_val_predictions.csv'
     )
 
-    save_predictions(
+    test_stats = save_predictions(
         model=model,
         data_loader=test_loader,
         device=device,
         split_name='test',
         output_path=results_dir / f'{model_name}_test_predictions.csv'
     )
+
+    # Create summary statistics file
+    summary_df = pd.DataFrame({
+        'Split': ['Train', 'Validation', 'Test'],
+        'Num_Samples': [train_stats['num_samples'], val_stats['num_samples'], test_stats['num_samples']],
+        'Target_Mean': [train_stats['target_mean'], val_stats['target_mean'], test_stats['target_mean']],
+        'Target_Std': [train_stats['target_std'], val_stats['target_std'], test_stats['target_std']],
+        'MAE': [train_stats['mae'], val_stats['mae'], test_stats['mae']],
+        'RMSE': [train_stats['rmse'], val_stats['rmse'], test_stats['rmse']],
+        'R2': [train_stats['r2'], val_stats['r2'], test_stats['r2']]
+    })
+
+    summary_path = results_dir / f'{model_name}_metrics_summary.csv'
+    summary_df.to_csv(summary_path, index=False)
+    print(f"\n✓ Saved metrics summary to: {summary_path}")
+
+    # Print summary table
+    print("\n" + "=" * 80)
+    print("Metrics Summary")
+    print("=" * 80)
+    print(summary_df.to_string(index=False))
 
     print("\n" + "=" * 80)
     print("All predictions saved successfully!")

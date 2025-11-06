@@ -1,0 +1,97 @@
+# Model Configuration with Weights & Biases Enabled
+# This is an example configuration showing how to enable W&B logging
+# Copy settings to your model_config.yml or use this file directly
+
+# Model Configuration
+model:
+  name: "MoK_CNN_11p1"
+  architecture: "SpatialProcessor"
+  spatial_input_shape: [1440, 481]
+  target: 1
+  dropout_rate: 0.2
+
+# Training Configuration
+training:
+  epochs: 100
+  learning_rate: 0.001
+  optimizer: "adamw"
+  loss: "mae"
+  random_seed: 42
+  weight_decay: 0.0001
+
+  # Learning Rate Scheduler
+  lr_scheduler:
+    enabled: true
+    type: "ReduceLROnPlateau"
+    mode: "min"
+    factor: 0.5
+    patience: 5
+    min_lr: 1.0e-6
+    threshold: 1.0e-4
+
+  # Callbacks
+  early_stopping:
+    enabled: true
+    patience: 10
+    monitor: "val_loss"
+
+  checkpoint:
+    enabled: true
+    save_best_only: true
+    monitor: "val_loss"
+
+# Data Configuration
+data:
+  data_dir: "/gdata2/ERA5/monthly"
+  target_file: "/home/deepakns/Work/data/MoKDates.csv"
+  input_geo_var_surf: [sst, ttr, tcc, msl]
+  input_geo_var_press: [u, v]
+  include_lat: false
+  include_lon: false
+  include_landsea: false
+  train_years: ["1961:2005"]
+  val_years: ["2006:2010"]
+  test_years: ["2011:2024"]
+  batch_size: 10
+  num_workers: 2
+  time_steps: [1, 2]
+  pressure_levels: [0, 1]
+  normalize_strategy: 1
+  augmentation:
+    enabled: true
+    rotation_range: 15
+    width_shift_range: 0.1
+    height_shift_range: 0.1
+    horizontal_flip: true
+
+# Logging Configuration
+logging:
+  log_dir: "logs"
+  tensorboard: true  # Keep TensorBoard enabled
+  save_frequency: 1
+
+  # Weights & Biases Configuration - ENABLED
+  wandb:
+    enabled: true  # ← Set to true to enable W&B
+
+    # Basic Settings
+    project: "MoK_date_predict"  # W&B project name
+    entity: null  # Your W&B username or team (null = use default)
+    name: null  # Run name (null = auto-generate from model name)
+
+    # Organization
+    tags:  # Tags for organizing experiments
+      - "with-scheduler"
+      - "lr-0.001"
+      - "dropout-0.2"
+    notes: "Training with ReduceLROnPlateau scheduler"  # Experiment notes
+
+    # Logging Options
+    log_model: true  # Save best model checkpoint to W&B
+    log_predictions: false  # Don't log prediction tables (saves time/space)
+    log_gradients: false  # Don't log gradient histograms (saves time)
+
+    # Advanced Options
+    watch_model: false  # Don't use wandb.watch() (can slow training)
+    watch_log: "gradients"  # What to log if watch_model is true
+    watch_freq: 100  # How often to log if watch_model is true

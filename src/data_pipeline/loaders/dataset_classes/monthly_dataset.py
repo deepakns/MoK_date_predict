@@ -76,6 +76,7 @@ class MonthlyERA5Dataset(Dataset):
         include_lat: bool = True,
         include_lon: bool = True,
         include_landsea: bool = True,
+        is_classification: bool = False,
     ):
         """
         Initialize the MonthlyERA5Dataset.
@@ -100,6 +101,8 @@ class MonthlyERA5Dataset(Dataset):
             include_lat: Whether to include latitude channel (default: True)
             include_lon: Whether to include longitude channel (default: True)
             include_landsea: Whether to include land-sea mask channel (default: True)
+            is_classification: Whether this is a classification task (default: False).
+                              If True, uses 'OnsetBinCode' column; if False, uses 'DateRelJun01' column.
         """
         self.data_dir = Path(data_dir)
 
@@ -121,6 +124,7 @@ class MonthlyERA5Dataset(Dataset):
         self.include_lat = include_lat
         self.include_lon = include_lon
         self.include_landsea = include_landsea
+        self.is_classification = is_classification
 
         # Define all available variables
         self.all_surface_vars = ['ttr', 'msl', 't2m', 'sst', 'tcc']
@@ -154,7 +158,7 @@ class MonthlyERA5Dataset(Dataset):
         # Load target data if provided
         self.targets: Optional[Dict[int, float]] = None
         if target_file:
-            self.targets = self._load_targets(target_file)
+            self.targets = self._load_targets(target_file, is_classification)
 
         # Get available years from directory if not specified
         if years is None:
@@ -178,19 +182,45 @@ class MonthlyERA5Dataset(Dataset):
                 continue
         return sorted(years)
 
-    def _load_targets(self, target_file: str) -> Dict[int, float]:
+    def _load_targets(self, target_file: str, is_classification: bool) -> Dict[int, float]:
         """
         Load target values from CSV file.
 
+        Selects the target column based on the is_classification flag:
+        - If is_classification=True: Use 'OnsetBinCode' for classification (class indices 0-8)
+        - If is_classification=False: Use 'DateRelJun01' for regression
+
         Args:
-            target_file: Path to CSV file with columns 'Year' and 'DateRelJun01'
+            target_file: Path to CSV file with columns 'Year' and either 'DateRelJun01' or 'OnsetBinCode'
+            is_classification: Whether this is a classification task
 
         Returns:
             Dictionary mapping year to target value
         """
         df = pd.read_csv(target_file)
+
+        # Select target column based on task type
+        if is_classification:
+            # Classification task: use OnsetBinCode (0-8)
+            target_col = 'OnsetBinCode'
+            if target_col not in df.columns:
+                raise ValueError(
+                    f"Classification task requires 'OnsetBinCode' column in target file. "
+                    f"Found columns: {list(df.columns)}"
+                )
+            print(f"  Using classification target: {target_col} (classes 0-{df[target_col].max():.0f})")
+        else:
+            # Regression task: use DateRelJun01
+            target_col = 'DateRelJun01'
+            if target_col not in df.columns:
+                raise ValueError(
+                    f"Regression task requires 'DateRelJun01' column in target file. "
+                    f"Found columns: {list(df.columns)}"
+                )
+            print(f"  Using regression target: {target_col}")
+
         # Create a dictionary mapping year to target value
-        targets = dict(zip(df['Year'].values, df['DateRelJun01'].values))
+        targets = dict(zip(df['Year'].values, df[target_col].values))
         return targets
 
     def _build_index(self):

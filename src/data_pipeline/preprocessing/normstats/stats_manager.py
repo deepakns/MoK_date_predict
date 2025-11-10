@@ -152,8 +152,8 @@ def load_normalization_stats(
             f"Expected mean.pt, std.pt, and metadata.json"
         )
 
-    mean = torch.load(mean_path, map_location=device)
-    std = torch.load(std_path, map_location=device)
+    mean = torch.load(mean_path, map_location=device, weights_only=True)
+    std = torch.load(std_path, map_location=device, weights_only=True)
 
     # Load metadata
     with open(metadata_path, 'r') as f:

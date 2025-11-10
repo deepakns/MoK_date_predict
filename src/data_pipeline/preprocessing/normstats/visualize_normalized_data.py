@@ -95,9 +95,9 @@ def plot_comparison(
         bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
     )
 
-    # Calculate percentiles for normalized data (use nanpercentile for masked data)
-    vmin_norm = np.nanpercentile(norm_np_masked, 10)
-    vmax_norm = np.nanpercentile(norm_np_masked, 90)
+    # Fixed coloraxis limits for normalized data
+    vmin_norm = -1.2
+    vmax_norm = 1.2
 
     # Plot normalized data
     im2 = axes[1].imshow(norm_np_masked, cmap='RdBu_r', aspect='auto', vmin=vmin_norm, vmax=vmax_norm)
@@ -195,6 +195,15 @@ def main():
     num_time_steps = data_config.get('num_time_steps', None)
     pressure_levels = data_config.get('pressure_levels', [0, 1])
 
+    # Get input variables from config
+    input_geo_var_surf = data_config.get('input_geo_var_surf', None)
+    input_geo_var_press = data_config.get('input_geo_var_press', None)
+
+    # Get static channel flags from config
+    include_lat = data_config.get('include_lat', False)
+    include_lon = data_config.get('include_lon', False)
+    include_landsea = data_config.get('include_landsea', False)
+
     # Determine years to plot
     years_to_plot = []
     if args.year:
@@ -263,8 +272,13 @@ def main():
             time_steps=time_steps,
             num_time_steps=num_time_steps,  # Fallback for backward compatibility
             pressure_levels=pressure_levels,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
             target_file=target_file,
-            transform=None  # No normalization
+            transform=None,  # No normalization
+            include_landsea=include_landsea,
+            include_lat=include_lat,
+            include_lon=include_lon
         )
 
         # Load normalized data
@@ -274,8 +288,13 @@ def main():
             time_steps=time_steps,
             num_time_steps=num_time_steps,  # Fallback for backward compatibility
             pressure_levels=pressure_levels,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
             target_file=target_file,
-            transform=normalize_transform
+            transform=normalize_transform,
+            include_landsea=include_landsea,
+            include_lat=include_lat,
+            include_lon=include_lon
         )
 
         if len(dataset_raw) == 0:
@@ -347,11 +366,12 @@ def main():
                 raw_channel_masked = raw_channel
                 norm_channel_masked = norm_channel
 
-            # Calculate percentiles for this channel
+            # Calculate percentiles for raw channel
             vmin_raw = np.nanpercentile(raw_channel_masked, 10)
             vmax_raw = np.nanpercentile(raw_channel_masked, 90)
-            vmin_norm = np.nanpercentile(norm_channel_masked, 10)
-            vmax_norm = np.nanpercentile(norm_channel_masked, 90)
+            # Fixed limits for normalized channel
+            vmin_norm = -1.2
+            vmax_norm = 1.2
 
             # Plot raw
             ax_raw = axes[row, col_raw]

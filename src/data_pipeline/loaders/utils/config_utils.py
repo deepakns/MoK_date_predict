@@ -151,6 +151,11 @@ def load_config_and_create_dataloaders(
     include_lon = data_config.get('include_lon', True)
     include_landsea = data_config.get('include_landsea', True)
 
+    # Get task type from model config (classification vs regression)
+    model_config = config.get('model', {})
+    num_classes = model_config.get('num_classes', 1)
+    is_classification = num_classes > 1  # If num_classes > 1, it's classification
+
     # Create datasets
     train_dataset = MonthlyERA5Dataset(
         data_dir=data_dir,
@@ -163,7 +168,8 @@ def load_config_and_create_dataloaders(
         input_geo_var_press=input_geo_var_press,
         include_lat=include_lat,
         include_lon=include_lon,
-        include_landsea=include_landsea
+        include_landsea=include_landsea,
+        is_classification=is_classification
     )
 
     val_dataset = MonthlyERA5Dataset(
@@ -177,7 +183,8 @@ def load_config_and_create_dataloaders(
         input_geo_var_press=input_geo_var_press,
         include_lat=include_lat,
         include_lon=include_lon,
-        include_landsea=include_landsea
+        include_landsea=include_landsea,
+        is_classification=is_classification
     )
 
     test_dataset = MonthlyERA5Dataset(
@@ -191,7 +198,8 @@ def load_config_and_create_dataloaders(
         input_geo_var_press=input_geo_var_press,
         include_lat=include_lat,
         include_lon=include_lon,
-        include_landsea=include_landsea
+        include_landsea=include_landsea,
+        is_classification=is_classification
     )
 
     # Create dataloaders

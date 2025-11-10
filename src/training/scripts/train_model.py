@@ -1,8 +1,15 @@
 """
-Main training script for the MoK_CNN_Predictor model.
+Main training script for the MoK_CNN_Predictor_V2 model.
 
 This script loads data from the configuration file, initializes the model,
 and trains it using the specified hyperparameters.
+
+Model Architecture (V2):
+    - Simplified CNN with 6 convolutional blocks (stride-2 convolutions)
+    - Channel progression: input → 32 → 64 → 128 → 256 → 512 → 1024
+    - Global Average Pooling for spatial reduction
+    - Selective L2 regularization on convolutional layers only
+    - Configurable activation functions (ReLU/PReLU/LeakyReLU)
 
 Usage:
     # Basic training
@@ -38,6 +45,7 @@ import pandas as pd
 from tqdm import tqdm
 import numpy as np
 import random
+from sklearn.metrics import f1_score
 
 # Add src directory to Python path so we can import project modules
 # Current file: .../MoK_date_predict/src/training/scripts/train_model.py
@@ -49,7 +57,8 @@ src_dir = training_dir.parent  # src/
 sys.path.insert(0, str(src_dir))
 
 # Import project modules
-from models.architectures.cnn import MoK_CNN_Predictor, create_model
+# Import CNN V2 architecture
+from models.architectures.cnn_v2 import create_model
 from data_pipeline.loaders.utils import load_config_and_create_dataloaders, parse_year_spec
 from data_pipeline.preprocessing.normstats import (
     compute_normalization_stats,
@@ -109,6 +118,16 @@ def get_optimizer(model: nn.Module, config: dict) -> torch.optim.Optimizer:
 
     Returns:
         PyTorch optimizer
+
+    Supported optimizers:
+        - adam: Adam optimizer
+        - adamw: AdamW optimizer with decoupled weight decay (recommended)
+        - sgd: SGD with momentum (0.9)
+        - rmsprop: RMSprop optimizer with alpha=0.99, eps=1e-8
+
+    Note:
+        For models with get_parameter_groups() method (like MoK_CNN_Predictor_V2),
+        L2 regularization is applied selectively to conv layers only.
     """
     optimizer_name = config['training']['optimizer'].lower()
     lr = config['training']['learning_rate']
@@ -116,17 +135,52 @@ def get_optimizer(model: nn.Module, config: dict) -> torch.optim.Optimizer:
     # Get weight_decay for L2 regularization (default: 0.0 for no regularization)
     weight_decay = config['training'].get('weight_decay', 0.0)
 
-    if optimizer_name == 'adam':
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    elif optimizer_name == 'sgd':
-        optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
-    elif optimizer_name == 'adamw':
-        # AdamW has built-in decoupled weight decay, which is more effective
-        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    else:
-        raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+    # Get RMSprop specific parameters (if applicable)
+    rmsprop_alpha = config['training'].get('rmsprop_alpha', 0.99)
+    rmsprop_eps = config['training'].get('rmsprop_eps', 1e-8)
+    rmsprop_momentum = config['training'].get('rmsprop_momentum', 0.0)
 
-    print(f"Optimizer: {optimizer_name}, Learning rate: {lr}, Weight decay (L2 reg): {weight_decay}")
+    # Check if model has get_parameter_groups method for selective L2 regularization
+    if hasattr(model, 'get_parameter_groups'):
+        print(f"Using model's parameter groups for selective L2 regularization")
+        param_groups = model.get_parameter_groups()
+
+        if optimizer_name == 'adam':
+            optimizer = optim.Adam(param_groups, lr=lr)
+        elif optimizer_name == 'sgd':
+            optimizer = optim.SGD(param_groups, lr=lr, momentum=0.9)
+        elif optimizer_name == 'adamw':
+            # AdamW has built-in decoupled weight decay, which is more effective
+            optimizer = optim.AdamW(param_groups, lr=lr)
+        elif optimizer_name == 'rmsprop':
+            optimizer = optim.RMSprop(param_groups, lr=lr, alpha=rmsprop_alpha,
+                                     eps=rmsprop_eps, momentum=rmsprop_momentum)
+        else:
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}. Choose from: adam, adamw, sgd, rmsprop")
+
+        print(f"Optimizer: {optimizer_name}, Learning rate: {lr}")
+        if optimizer_name == 'rmsprop':
+            print(f"  RMSprop alpha: {rmsprop_alpha}, eps: {rmsprop_eps}, momentum: {rmsprop_momentum}")
+        print(f"  L2 regularization on conv layers: {weight_decay}")
+        print(f"  No L2 regularization on BatchNorm/biases/output layer")
+    else:
+        # Fallback to standard optimizer with uniform weight decay
+        if optimizer_name == 'adam':
+            optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        elif optimizer_name == 'sgd':
+            optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
+        elif optimizer_name == 'adamw':
+            # AdamW has built-in decoupled weight decay, which is more effective
+            optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        elif optimizer_name == 'rmsprop':
+            optimizer = optim.RMSprop(model.parameters(), lr=lr, alpha=rmsprop_alpha,
+                                     eps=rmsprop_eps, momentum=rmsprop_momentum, weight_decay=weight_decay)
+        else:
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}. Choose from: adam, adamw, sgd, rmsprop")
+
+        print(f"Optimizer: {optimizer_name}, Learning rate: {lr}, Weight decay (L2 reg): {weight_decay}")
+        if optimizer_name == 'rmsprop':
+            print(f"  RMSprop alpha: {rmsprop_alpha}, eps: {rmsprop_eps}, momentum: {rmsprop_momentum}")
 
     return optimizer
 
@@ -282,6 +336,10 @@ def get_loss_function(config: dict) -> nn.Module:
         loss_fn = nn.L1Loss()
     elif loss_name == 'huber':
         loss_fn = nn.HuberLoss()
+    elif loss_name == 'cross_entropy' or loss_name == 'crossentropy' or loss_name == 'CrossEntropyLoss':
+        # CrossEntropyLoss for multiclass classification
+        # Expects raw logits (no softmax) and class indices as targets
+        loss_fn = nn.CrossEntropyLoss()
     else:
         raise ValueError(f"Unsupported loss function: {loss_name}")
 
@@ -295,7 +353,8 @@ def train_one_epoch(
     loss_fn: nn.Module,
     device: torch.device,
     epoch: int,
-    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+    gaussian_noise_std: float = 0.0
 ) -> Dict[str, float]:
     """
     Train the model for one epoch.
@@ -317,6 +376,11 @@ def train_one_epoch(
     total_loss = 0.0
     num_batches = len(train_loader)
 
+    # For classification metrics
+    is_classification = isinstance(loss_fn, nn.CrossEntropyLoss)
+    all_predictions = []
+    all_targets = []
+
     # Create progress bar
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch+1}", ncols=100, leave=False)
 
@@ -324,6 +388,15 @@ def train_one_epoch(
         # Move data and target to device
         data = data.to(device)
         target = target.to(device)
+
+        # Apply Gaussian noise augmentation (training only)
+        if gaussian_noise_std > 0:
+            noise = torch.randn_like(data) * gaussian_noise_std
+            data = data + noise
+
+        # For classification, targets must be integers (class indices)
+        if is_classification:
+            target = target.long().view(-1)  # Convert to long and flatten to 1D
 
         # Zero gradients
         optimizer.zero_grad()
@@ -347,21 +420,40 @@ def train_one_epoch(
         # Accumulate loss
         total_loss += loss.item()
 
+        # Collect predictions and targets for classification metrics
+        if is_classification:
+            _, predicted = torch.max(output, 1)
+            all_predictions.extend(predicted.cpu().numpy())
+            all_targets.extend(target.cpu().numpy())
+
         # Update progress bar
         pbar.set_postfix({'loss': f'{loss.item():.4f}'})
 
     # Compute average metrics
     avg_loss = total_loss / num_batches
-    rmse = avg_loss ** 0.5  # Square root of MSE
 
-    return {'loss': avg_loss, 'rmse': rmse}
+    metrics = {'loss': avg_loss}
+
+    # For classification: compute F1 score
+    if is_classification:
+        f1_macro = f1_score(all_targets, all_predictions, average='macro', zero_division=0)
+        metrics['f1_score'] = f1_macro
+    else:
+        # For regression: compute RMSE from predictions and targets
+        # Note: We don't collect predictions/targets during training to save memory
+        # So we use the average loss as a proxy (only valid if loss_fn is MSE)
+        rmse = avg_loss ** 0.5
+        metrics['rmse'] = rmse
+
+    return metrics
 
 
 def validate(
     model: nn.Module,
     val_loader: DataLoader,
     loss_fn: nn.Module,
-    device: torch.device
+    device: torch.device,
+    train_target_mean: Optional[float] = None
 ) -> Dict[str, float]:
     """
     Validate the model.
@@ -371,6 +463,7 @@ def validate(
         val_loader: Validation data loader
         loss_fn: Loss function
         device: Device to use (cpu or cuda)
+        train_target_mean: Mean of training targets (for skill score calculation in regression)
 
     Returns:
         Dictionary containing validation metrics
@@ -379,6 +472,11 @@ def validate(
 
     total_loss = 0.0
     num_batches = len(val_loader)
+
+    # For classification metrics
+    is_classification = isinstance(loss_fn, nn.CrossEntropyLoss)
+    all_predictions = []
+    all_targets = []
 
     # Create progress bar
     pbar = tqdm(val_loader, desc="Validating", ncols=100, leave=False)
@@ -389,6 +487,10 @@ def validate(
             data = data.to(device)
             target = target.to(device)
 
+            # For classification, targets must be integers (class indices)
+            if is_classification:
+                target = target.long().view(-1)  # Convert to long and flatten to 1D
+
             # Forward pass
             output = model(data)
 
@@ -398,14 +500,69 @@ def validate(
             # Accumulate loss
             total_loss += loss.item()
 
+            # Collect predictions and targets for metrics
+            if is_classification:
+                _, predicted = torch.max(output, 1)
+                all_predictions.extend(predicted.cpu().numpy())
+                all_targets.extend(target.cpu().numpy())
+            else:
+                # For regression: collect raw predictions and targets
+                # Handle both single and batch predictions
+                pred_np = output.squeeze().cpu().numpy()
+                target_np = target.squeeze().cpu().numpy()
+
+                # Convert scalars to lists for extend
+                if pred_np.ndim == 0:
+                    all_predictions.append(pred_np.item())
+                    all_targets.append(target_np.item())
+                else:
+                    all_predictions.extend(pred_np)
+                    all_targets.extend(target_np)
+
             # Update progress bar
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
 
     # Compute average metrics
     avg_loss = total_loss / num_batches
-    rmse = avg_loss ** 0.5  # Square root of MSE
 
-    return {'loss': avg_loss, 'rmse': rmse}
+    metrics = {'loss': avg_loss}
+
+    # For classification: compute F1 score
+    if is_classification:
+        from sklearn.metrics import f1_score
+        f1_macro = f1_score(all_targets, all_predictions, average='macro', zero_division=0)
+        metrics['f1_score'] = f1_macro
+    else:
+        # For regression: compute multiple metrics
+        import numpy as np
+        from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+        predictions = np.array(all_predictions)
+        targets = np.array(all_targets)
+
+        # RMSE (computed from predictions and targets)
+        rmse = np.sqrt(mean_squared_error(targets, predictions))
+        metrics['rmse'] = rmse
+
+        # MAE (Mean Absolute Error)
+        mae = mean_absolute_error(targets, predictions)
+        metrics['mae'] = mae
+
+        # Skill Score: 1 - (MSE_model / MSE_baseline)
+        # where baseline predicts the training mean for all samples
+        # A score of 1 means perfect predictions, 0 means same as baseline, <0 means worse than baseline
+        if train_target_mean is not None:
+            mse_model = mean_squared_error(targets, predictions)
+            mse_baseline = mean_squared_error(targets, np.full_like(targets, train_target_mean))
+            skill_score = 1 - (mse_model / mse_baseline) if mse_baseline > 0 else 0.0
+            metrics['skill_score'] = skill_score
+        else:
+            # Fallback: compute R² if training mean not provided
+            from sklearn.metrics import r2_score
+            r2 = r2_score(targets, predictions)
+            metrics['r2'] = r2
+
+    return metrics
 
 
 def save_predictions(
@@ -413,7 +570,10 @@ def save_predictions(
     data_loader: DataLoader,
     device: torch.device,
     split_name: str,
-    output_path: Path
+    output_path: Path,
+    is_classification: bool = False,
+    num_classes: int = None,
+    train_target_mean: Optional[float] = None
 ) -> Dict[str, float]:
     """
     Generate predictions and save to CSV file.
@@ -424,9 +584,14 @@ def save_predictions(
         device: Device to use
         split_name: Name of the split (train/val/test)
         output_path: Path to save CSV file
+        is_classification: If True, output predicted classes; if False, output regression values
+        num_classes: Number of classes for classification (if None, computed from data)
+        train_target_mean: Mean of training targets (for skill score calculation in regression)
 
     Returns:
-        Dictionary containing evaluation metrics (target_mean, target_std, mae, rmse, r2)
+        Dictionary containing evaluation metrics
+        - For classification: accuracy, f1_macro, f1_per_class, confusion_matrix, num_samples, num_correct
+        - For regression: target_mean, target_std, mae, rmse, skill_score (or r2), num_samples
     """
     model.eval()
 
@@ -453,57 +618,145 @@ def save_predictions(
             batch_years = [data_loader.dataset.get_metadata(i)['year']
                           for i in range(start_idx, end_idx)]
 
-            # Store predictions, targets, and years
-            predictions.extend(output.cpu().numpy().flatten().tolist())
+            # Store predictions based on task type
+            if is_classification:
+                # For classification: get predicted class (argmax of logits)
+                pred_classes = torch.argmax(output, dim=1).cpu().numpy().tolist()
+                predictions.extend(pred_classes)
+            else:
+                # For regression: use raw output
+                predictions.extend(output.cpu().numpy().flatten().tolist())
+
             targets.extend(target.numpy().flatten().tolist())
             years.extend(batch_years)
 
     # Create DataFrame
-    df = pd.DataFrame({
-        'Year': years,
-        'Target': targets,
-        'Prediction': predictions,
-        'Error': [p - t for p, t in zip(predictions, targets)],
-        'Absolute_Error': [abs(p - t) for p, t in zip(predictions, targets)]
-    })
+    if is_classification:
+        # Classification: predictions and targets are class indices
+        df = pd.DataFrame({
+            'Year': years,
+            'Target_Class': [int(t) for t in targets],
+            'Predicted_Class': [int(p) for p in predictions],
+            'Correct': [int(p) == int(t) for p, t in zip(predictions, targets)]
+        })
+    else:
+        # Regression: predictions and targets are continuous values
+        df = pd.DataFrame({
+            'Year': years,
+            'Target': targets,
+            'Prediction': predictions,
+            'Error': [p - t for p, t in zip(predictions, targets)],
+            'Absolute_Error': [abs(p - t) for p, t in zip(predictions, targets)]
+        })
 
     # Sort by year
     df = df.sort_values('Year').reset_index(drop=True)
-
-    # Calculate statistics
-    target_mean = df['Target'].mean()
-    target_std = df['Target'].std()
-    mae = df['Absolute_Error'].mean()
-    rmse = (df['Error'] ** 2).mean() ** 0.5
-
-    # Calculate R² score
-    # R² = 1 - (SS_res / SS_tot)
-    # where SS_res = sum of squared residuals, SS_tot = total sum of squares
-    ss_res = (df['Error'] ** 2).sum()
-    ss_tot = ((df['Target'] - target_mean) ** 2).sum()
-    r2_score = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
 
     # Save to CSV
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
     print(f"✓ Saved predictions to: {output_path}")
 
-    # Print summary statistics
-    print(f"  Target Mean: {target_mean:.4f}")
-    print(f"  Target Std:  {target_std:.4f}")
-    print(f"  MAE:  {mae:.4f}")
-    print(f"  RMSE: {rmse:.4f}")
-    print(f"  R²:   {r2_score:.4f}")
+    # Calculate and print statistics based on task type
+    if is_classification:
+        # Classification metrics
+        from sklearn.metrics import confusion_matrix, f1_score, classification_report
 
-    # Return statistics
-    return {
-        'target_mean': target_mean,
-        'target_std': target_std,
-        'mae': mae,
-        'rmse': rmse,
-        'r2': r2_score,
-        'num_samples': len(df)
-    }
+        y_true = df['Target_Class'].values
+        y_pred = df['Predicted_Class'].values
+
+        # Use provided num_classes or compute from data
+        if num_classes is None:
+            all_classes = sorted(set(y_true) | set(y_pred))
+            num_classes = max(all_classes) + 1 if all_classes else 0
+
+        accuracy = df['Correct'].mean()
+        f1_macro = f1_score(y_true, y_pred, average='macro', zero_division=0, labels=list(range(num_classes)))
+        f1_per_class = f1_score(y_true, y_pred, average=None, zero_division=0, labels=list(range(num_classes)))
+        conf_matrix = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
+
+        print(f"  Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
+        print(f"  F1 Score (Macro): {f1_macro:.4f}")
+        print(f"  Correct:  {df['Correct'].sum()}/{len(df)}")
+
+        # Print per-class F1 scores
+        print(f"\n  Per-Class F1 Scores:")
+        for class_idx, f1 in enumerate(f1_per_class):
+            print(f"    Class {class_idx}: {f1:.4f}")
+
+        # Save confusion matrix to separate file
+        conf_matrix_path = output_path.parent / f"{output_path.stem}_confusion_matrix.csv"
+        conf_matrix_df = pd.DataFrame(
+            conf_matrix,
+            index=[f"True_{i}" for i in range(len(conf_matrix))],
+            columns=[f"Pred_{i}" for i in range(len(conf_matrix))]
+        )
+        conf_matrix_df.to_csv(conf_matrix_path)
+        print(f"\n  ✓ Confusion matrix saved to: {conf_matrix_path}")
+
+        # Return statistics
+        return {
+            'accuracy': accuracy,
+            'f1_macro': f1_macro,
+            'f1_per_class': f1_per_class.tolist(),
+            'confusion_matrix': conf_matrix.tolist(),
+            'num_samples': len(df),
+            'num_correct': int(df['Correct'].sum())
+        }
+    else:
+        # Regression metrics
+        target_mean = df['Target'].mean()
+        target_std = df['Target'].std()
+        mae = df['Absolute_Error'].mean()
+        rmse = (df['Error'] ** 2).mean() ** 0.5
+
+        # Calculate Skill Score: 1 - (MSE_model / MSE_baseline)
+        # where baseline predicts the training mean for all samples
+        # A score of 1 means perfect predictions, 0 means same as baseline, <0 means worse than baseline
+        if train_target_mean is not None:
+            mse_model = (df['Error'] ** 2).mean()
+            baseline_errors = df['Target'] - train_target_mean
+            mse_baseline = (baseline_errors ** 2).mean()
+            skill_score = 1 - (mse_model / mse_baseline) if mse_baseline > 0 else 0.0
+
+            print(f"  Target Mean: {target_mean:.4f}")
+            print(f"  Target Std:  {target_std:.4f}")
+            print(f"  MAE:  {mae:.4f}")
+            print(f"  RMSE: {rmse:.4f}")
+            print(f"  Skill Score: {skill_score:.4f} (baseline: always predict {train_target_mean:.4f})")
+
+            # Return statistics
+            return {
+                'target_mean': target_mean,
+                'target_std': target_std,
+                'mae': mae,
+                'rmse': rmse,
+                'skill_score': skill_score,
+                'num_samples': len(df)
+            }
+        else:
+            # Fallback: Calculate R² score if training mean not provided
+            # R² = 1 - (SS_res / SS_tot)
+            # where SS_res = sum of squared residuals, SS_tot = total sum of squares
+            ss_res = (df['Error'] ** 2).sum()
+            ss_tot = ((df['Target'] - target_mean) ** 2).sum()
+            r2_score = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+            print(f"  Target Mean: {target_mean:.4f}")
+            print(f"  Target Std:  {target_std:.4f}")
+            print(f"  MAE:  {mae:.4f}")
+            print(f"  RMSE: {rmse:.4f}")
+            print(f"  R²:   {r2_score:.4f}")
+
+            # Return statistics
+            return {
+                'target_mean': target_mean,
+                'target_std': target_std,
+                'mae': mae,
+                'rmse': rmse,
+                'r2': r2_score,
+                'num_samples': len(df)
+            }
 
 
 def train(
@@ -530,6 +783,17 @@ def train(
     # Get training configuration
     num_epochs = config['training']['epochs']
 
+    # Get Gaussian noise configuration for data augmentation
+    augmentation_config = config.get('data', {}).get('augmentation', {})
+    gaussian_noise_config = augmentation_config.get('gaussian_noise', {})
+    gaussian_noise_enabled = gaussian_noise_config.get('enabled', False)
+    gaussian_noise_std = gaussian_noise_config.get('std', 0.01) if gaussian_noise_enabled else 0.0
+
+    if gaussian_noise_enabled:
+        print(f"Gaussian noise augmentation enabled: std={gaussian_noise_std}")
+    else:
+        print("Gaussian noise augmentation disabled")
+
     # Create optimizer and loss function
     optimizer = get_optimizer(model, config)
     loss_fn = get_loss_function(config)
@@ -545,19 +809,29 @@ def train(
 
     # Create callbacks
     model_name = config['model']['name']
+
+    # Get validation metric from config (default to 'loss')
+    val_metric = config['training'].get('val_metric', 'loss')
+
+    # Determine mode based on metric (lower is better for loss/mae, higher is better for r2)
+    metric_mode = 'max' if val_metric == 'r2' else 'min'
+
+    # Build monitor metric name for validation
+    monitor_metric = f'val_{val_metric}'
+
     checkpoint_callback = ModelCheckpoint(
         checkpoint_dir='checkpoints',
-        monitor=config['training']['checkpoint']['monitor'],
-        mode='min' if 'loss' in config['training']['checkpoint']['monitor'] else 'max',
+        monitor=monitor_metric,
+        mode=metric_mode,
         save_best_only=config['training']['checkpoint']['save_best_only'],
         verbose=True,
         model_name=model_name
     )
 
     early_stopping = EarlyStopping(
-        monitor=config['training']['early_stopping']['monitor'],
+        monitor=monitor_metric,
         patience=config['training']['early_stopping']['patience'],
-        mode='min' if 'loss' in config['training']['early_stopping']['monitor'] else 'max',
+        mode=metric_mode,
         verbose=True
     ) if config['training']['early_stopping']['enabled'] else None
 
@@ -600,9 +874,25 @@ def train(
         start_epoch = checkpoint_info['epoch'] + 1
         print(f"Resumed training from epoch {start_epoch}")
 
+    # Compute training target mean for skill score calculation (regression only)
+    train_target_mean = None
+    num_classes = config.get('model', {}).get('num_classes', 1)
+    is_classification = num_classes > 1
+
+    if not is_classification:
+        # Compute mean of training targets
+        print("\nComputing training target mean for skill score calculation...")
+        all_train_targets = []
+        for _, target in train_loader:
+            all_train_targets.extend(target.numpy().flatten().tolist())
+        train_target_mean = np.mean(all_train_targets)
+        print(f"Training target mean: {train_target_mean:.4f}")
+
     # Training loop
     print("\n" + "=" * 80)
     print("Starting Training")
+    print("=" * 80)
+    print(f"Monitoring validation metric: {monitor_metric} (mode: {metric_mode})")
     print("=" * 80)
 
     for epoch in range(start_epoch, num_epochs):
@@ -618,7 +908,8 @@ def train(
             loss_fn=loss_fn,
             device=device,
             epoch=epoch,
-            scheduler=scheduler if isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR) else None
+            scheduler=scheduler if isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR) else None,
+            gaussian_noise_std=gaussian_noise_std
         )
 
         # Validate
@@ -626,13 +917,28 @@ def train(
             model=model,
             val_loader=val_loader,
             loss_fn=loss_fn,
-            device=device
+            device=device,
+            train_target_mean=train_target_mean
         )
 
         # Print metrics
         print(f"\nEpoch [{epoch + 1}/{num_epochs}] Results:")
-        print(f"  Train Loss: {train_metrics['loss']:.6f}  |  Train RMSE: {train_metrics['rmse']:.6f}")
-        print(f"  Val Loss:   {val_metrics['loss']:.6f}  |  Val RMSE:   {val_metrics['rmse']:.6f}")
+
+        # Check if classification or regression
+        if 'f1_score' in train_metrics:
+            # Classification: print F1 scores
+            print(f"  Train Loss: {train_metrics['loss']:.6f}  |  Train F1: {train_metrics['f1_score']:.4f}")
+            print(f"  Val Loss:   {val_metrics['loss']:.6f}  |  Val F1:   {val_metrics['f1_score']:.4f}")
+        else:
+            # Regression: print multiple metrics
+            print(f"  Train Loss: {train_metrics['loss']:.6f}  |  Train RMSE: {train_metrics['rmse']:.6f}")
+            print(f"  Val Loss:   {val_metrics['loss']:.6f}  |  Val RMSE:   {val_metrics['rmse']:.6f}")
+
+            # Print skill score or R2 depending on what's available
+            if 'skill_score' in val_metrics:
+                print(f"  Val MAE:    {val_metrics['mae']:.6f}  |  Val Skill:  {val_metrics['skill_score']:.6f}")
+            else:
+                print(f"  Val MAE:    {val_metrics['mae']:.6f}  |  Val R2:     {val_metrics.get('r2', float('nan')):.6f}")
 
         # Get current learning rate
         current_lr = optimizer.param_groups[0]['lr']
@@ -641,17 +947,32 @@ def train(
         # Combine metrics for callbacks
         all_metrics = {
             'train_loss': train_metrics['loss'],
-            'train_rmse': train_metrics['rmse'],
-            'val_loss': val_metrics['loss'],
-            'val_rmse': val_metrics['rmse']
+            'val_loss': val_metrics['loss']
         }
+
+        # Add task-specific metrics
+        if 'f1_score' in train_metrics:
+            all_metrics['train_f1'] = train_metrics['f1_score']
+            all_metrics['val_f1'] = val_metrics['f1_score']
+        else:
+            all_metrics['train_rmse'] = train_metrics['rmse']
+            all_metrics['val_rmse'] = val_metrics['rmse']
+            all_metrics['val_mae'] = val_metrics['mae']
+            # Add skill_score or r2 depending on which is available
+            if 'skill_score' in val_metrics:
+                all_metrics['val_skill_score'] = val_metrics['skill_score']
+            elif 'r2' in val_metrics:
+                all_metrics['val_r2'] = val_metrics['r2']
 
         # Step the learning rate scheduler (if enabled)
         if scheduler is not None:
+            # Get the metric value to use for scheduler (use configured val_metric)
+            scheduler_metric_value = val_metrics.get(val_metric, val_metrics['loss'])
+
             # Check if using custom scheduler with restore capability
             if isinstance(scheduler, ReduceLROnPlateauWithRestore):
                 # Custom scheduler needs model to restore state when LR is reduced
-                restored = scheduler.step(val_metrics['loss'], model, epoch=epoch)
+                restored = scheduler.step(scheduler_metric_value, model, epoch=epoch)
                 if restored:
                     print(f"  ⚠ Model restored to best epoch - continuing training from there")
                     # Reset early stopping counter to give model a fresh chance with new LR
@@ -660,7 +981,7 @@ def train(
                         print(f"  ✓ Early stopping counter reset")
             elif isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 # Standard PyTorch ReduceLROnPlateau (metric-based)
-                scheduler.step(val_metrics['loss'])
+                scheduler.step(scheduler_metric_value)
             elif isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
                 # OneCycleLR steps per batch, not per epoch (handled in train_one_epoch)
                 pass
@@ -720,7 +1041,7 @@ def train(
     best_checkpoint_path = checkpoint_callback.best_model_path
     if best_checkpoint_path and Path(best_checkpoint_path).exists():
         print(f"Loading best model from: {best_checkpoint_path}")
-        checkpoint = torch.load(best_checkpoint_path, map_location=device)
+        checkpoint = torch.load(best_checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         print(f"✓ Loaded best model from epoch {checkpoint['epoch']}")
         print(f"  Best val_loss: {checkpoint['metrics']['val_loss']:.6f}")
@@ -734,6 +1055,9 @@ def train(
 
     # Get model name and create results directory
     model_name = config['model']['name']
+    num_classes = config.get('model', {}).get('num_classes', 1)
+    is_classification = num_classes > 1
+
     project_root = src_dir.parent
     results_dir = project_root / 'results' / 'tables'
 
@@ -743,15 +1067,23 @@ def train(
         data_loader=train_loader,
         device=device,
         split_name='train',
-        output_path=results_dir / f'{model_name}_train_predictions.csv'
+        output_path=results_dir / f'{model_name}_train_predictions.csv',
+        is_classification=is_classification,
+        num_classes=num_classes
     )
+
+    # For regression, get training target mean for skill score calculation
+    train_target_mean = train_stats.get('target_mean', None) if not is_classification else None
 
     val_stats = save_predictions(
         model=model,
         data_loader=val_loader,
         device=device,
         split_name='val',
-        output_path=results_dir / f'{model_name}_val_predictions.csv'
+        output_path=results_dir / f'{model_name}_val_predictions.csv',
+        is_classification=is_classification,
+        num_classes=num_classes,
+        train_target_mean=train_target_mean
     )
 
     test_stats = save_predictions(
@@ -759,19 +1091,49 @@ def train(
         data_loader=test_loader,
         device=device,
         split_name='test',
-        output_path=results_dir / f'{model_name}_test_predictions.csv'
+        output_path=results_dir / f'{model_name}_test_predictions.csv',
+        is_classification=is_classification,
+        num_classes=num_classes,
+        train_target_mean=train_target_mean
     )
 
-    # Create summary statistics file
-    summary_df = pd.DataFrame({
-        'Split': ['Train', 'Validation', 'Test'],
-        'Num_Samples': [train_stats['num_samples'], val_stats['num_samples'], test_stats['num_samples']],
-        'Target_Mean': [train_stats['target_mean'], val_stats['target_mean'], test_stats['target_mean']],
-        'Target_Std': [train_stats['target_std'], val_stats['target_std'], test_stats['target_std']],
-        'MAE': [train_stats['mae'], val_stats['mae'], test_stats['mae']],
-        'RMSE': [train_stats['rmse'], val_stats['rmse'], test_stats['rmse']],
-        'R2': [train_stats['r2'], val_stats['r2'], test_stats['r2']]
-    })
+    # Create summary statistics file based on task type
+    if is_classification:
+        summary_df = pd.DataFrame({
+            'Split': ['Train', 'Validation', 'Test'],
+            'Num_Samples': [train_stats['num_samples'], val_stats['num_samples'], test_stats['num_samples']],
+            'Num_Correct': [train_stats['num_correct'], val_stats['num_correct'], test_stats['num_correct']],
+            'Accuracy': [train_stats['accuracy'], val_stats['accuracy'], test_stats['accuracy']],
+            'F1_Macro': [train_stats['f1_macro'], val_stats['f1_macro'], test_stats['f1_macro']]
+        })
+
+        # Save per-class F1 scores to a separate file
+        # Use num_classes from config (already defined above at line 817)
+        per_class_f1_df = pd.DataFrame({
+            'Class': [f'Class_{i}' for i in range(num_classes)],
+            'Train_F1': train_stats['f1_per_class'],
+            'Val_F1': val_stats['f1_per_class'],
+            'Test_F1': test_stats['f1_per_class']
+        })
+        per_class_f1_path = results_dir / f'{model_name}_per_class_f1.csv'
+        per_class_f1_df.to_csv(per_class_f1_path, index=False)
+        print(f"✓ Saved per-class F1 scores to: {per_class_f1_path}")
+    else:
+        # Use skill_score if available, otherwise fall back to r2
+        metric_name = 'Skill_Score' if 'skill_score' in val_stats else 'R2'
+        metric_key = 'skill_score' if 'skill_score' in val_stats else 'r2'
+
+        summary_df = pd.DataFrame({
+            'Split': ['Train', 'Validation', 'Test'],
+            'Num_Samples': [train_stats['num_samples'], val_stats['num_samples'], test_stats['num_samples']],
+            'Target_Mean': [train_stats['target_mean'], val_stats['target_mean'], test_stats['target_mean']],
+            'Target_Std': [train_stats['target_std'], val_stats['target_std'], test_stats['target_std']],
+            'MAE': [train_stats['mae'], val_stats['mae'], test_stats['mae']],
+            'RMSE': [train_stats['rmse'], val_stats['rmse'], test_stats['rmse']],
+            metric_name: [train_stats.get(metric_key, float('nan')),
+                         val_stats.get(metric_key, float('nan')),
+                         test_stats.get(metric_key, float('nan'))]
+        })
 
     summary_path = results_dir / f'{model_name}_metrics_summary.csv'
     summary_df.to_csv(summary_path, index=False)
@@ -783,20 +1145,60 @@ def train(
     print("=" * 80)
     print(summary_df.to_string(index=False))
 
+    # For classification, also print per-class F1 scores
+    if is_classification:
+        print("\n" + "=" * 80)
+        print("Per-Class F1 Scores")
+        print("=" * 80)
+        print(per_class_f1_df.to_string(index=False))
+
     # Log final summary metrics to W&B
     if wandb_logger:
-        # Log summary metrics
-        wandb_logger.log_summary({
-            'final/train_mae': train_stats['mae'],
-            'final/train_rmse': train_stats['rmse'],
-            'final/train_r2': train_stats['r2'],
-            'final/val_mae': val_stats['mae'],
-            'final/val_rmse': val_stats['rmse'],
-            'final/val_r2': val_stats['r2'],
-            'final/test_mae': test_stats['mae'],
-            'final/test_rmse': test_stats['rmse'],
-            'final/test_r2': test_stats['r2']
-        })
+        # Log summary metrics based on task type
+        if is_classification:
+            # Build summary dict with accuracy and F1 scores
+            summary_dict = {
+                'final/train_accuracy': train_stats['accuracy'],
+                'final/val_accuracy': val_stats['accuracy'],
+                'final/test_accuracy': test_stats['accuracy'],
+                'final/train_f1_macro': train_stats['f1_macro'],
+                'final/val_f1_macro': val_stats['f1_macro'],
+                'final/test_f1_macro': test_stats['f1_macro']
+            }
+
+            # Add per-class F1 scores
+            for class_idx in range(len(train_stats['f1_per_class'])):
+                summary_dict[f'final/train_f1_class_{class_idx}'] = train_stats['f1_per_class'][class_idx]
+                summary_dict[f'final/val_f1_class_{class_idx}'] = val_stats['f1_per_class'][class_idx]
+                summary_dict[f'final/test_f1_class_{class_idx}'] = test_stats['f1_per_class'][class_idx]
+
+            wandb_logger.log_summary(summary_dict)
+        else:
+            # Build summary dict for regression with skill_score or r2
+            summary_dict = {
+                'final/train_mae': train_stats['mae'],
+                'final/train_rmse': train_stats['rmse'],
+                'final/val_mae': val_stats['mae'],
+                'final/val_rmse': val_stats['rmse'],
+                'final/test_mae': test_stats['mae'],
+                'final/test_rmse': test_stats['rmse']
+            }
+
+            # Add skill_score or r2 depending on which is available
+            if 'skill_score' in val_stats:
+                summary_dict.update({
+                    'final/train_skill_score': train_stats.get('skill_score', float('nan')),
+                    'final/val_skill_score': val_stats['skill_score'],
+                    'final/test_skill_score': test_stats['skill_score']
+                })
+            elif 'r2' in val_stats:
+                summary_dict.update({
+                    'final/train_r2': train_stats['r2'],
+                    'final/val_r2': val_stats['r2'],
+                    'final/test_r2': test_stats['r2']
+                })
+
+            wandb_logger.log_summary(summary_dict)
 
         # Log predictions tables if enabled
         if config['logging']['wandb'].get('log_predictions', False):
@@ -1082,7 +1484,46 @@ def main():
     dropout_rate = config.get('model', {}).get('dropout_rate', 0.5)
     print(f"Dropout rate: {dropout_rate}")
 
-    model = create_model(in_channels=in_channels, dropout_rate=dropout_rate)
+    # Get num_classes from config (default to 1 for regression)
+    num_classes = config.get('model', {}).get('num_classes', 1)
+    if num_classes > 1:
+        print(f"Classification mode: {num_classes} classes")
+    else:
+        print(f"Regression mode: single output")
+
+    # Get activation configuration
+    activation_config = config.get('model', {}).get('activation', {})
+    activation_type = activation_config.get('type', 'relu')
+    prelu_mode = activation_config.get('prelu_mode', 'shared')
+    leaky_relu_slope = activation_config.get('leaky_relu_slope', 0.01)
+
+    print(f"Activation function: {activation_type}")
+    if activation_type == 'prelu':
+        print(f"  PReLU mode: {prelu_mode}")
+    elif activation_type == 'leaky_relu':
+        print(f"  LeakyReLU slope: {leaky_relu_slope}")
+
+    # Get L2 regularization strength from config
+    l2_reg = config.get('training', {}).get('weight_decay', 0.0001)
+    print(f"L2 regularization: {l2_reg}")
+
+    # Get SPP configuration
+    spp_option = config.get('model', {}).get('spp_option', 2)
+    spp_ops = config.get('model', {}).get('spp_ops', [1])
+    print(f"SPP pooling type: {['max only', 'avg only', 'max and avg'][spp_option]}")
+    print(f"SPP pyramid levels: {spp_ops}")
+
+    model = create_model(
+        in_channels=in_channels,
+        dropout_rate=dropout_rate,
+        num_classes=num_classes,
+        activation_type=activation_type,
+        prelu_mode=prelu_mode,
+        leaky_relu_slope=leaky_relu_slope,
+        l2_reg=l2_reg,
+        spp_option=spp_option,
+        spp_ops=spp_ops
+    )
     model = model.to(device)
 
     # Get spatial dimensions from first batch

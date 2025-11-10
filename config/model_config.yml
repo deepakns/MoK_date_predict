@@ -1,10 +1,19 @@
 # Model Configuration
 model:
-  name: "MoK_CNN_16"
+  name: "MoK_CNN_19"
   architecture: "SpatialProcessor"  # Example architecture
   spatial_input_shape: [1440, 481]  # 36 channels: 15 surface + 18 pressure + 1 land_sea_mask + 2 coords
   target: 1
+  num_classes: 9  # Number of classes for classification (0-8 for binned onset dates)
   dropout_rate: 0.2  # Dropout probability for fc1, fc2, fc3, and fc4 layers
+
+  # Activation Function Configuration
+  activation:
+    type: "prelu"  # Options: "relu", "prelu", "leaky_relu"
+    # PReLU options (only used when type="prelu")
+    prelu_mode: "channel"  # Options: "shared" (1 param), "channel" (1 param per channel)
+    # LeakyReLU options (only used when type="leaky_relu")
+    leaky_relu_slope: 0.01  # Negative slope for LeakyReLU (typical: 0.01 to 0.2)
 
   # Weight Initialization
   weight_init:
@@ -22,7 +31,7 @@ training:
   epochs: 50 # batch size is set in data section
   learning_rate: 0.01
   optimizer: "adamw"
-  loss: "mse"
+  loss: "cross_entropy"  # CrossEntropyLoss for multiclass classification
   random_seed: 42  # For reproducibility
   weight_decay: 0.0001  # L2 regularization strength (typical values: 1e-4 to 1e-5)
 
@@ -84,8 +93,9 @@ data:
   # Path to ERA5 monthly NetCDF files
   data_dir: "/gdata2/ERA5/monthly"
 
-  # Path to target CSV file (Year, DateRelJun01)
-  target_file: "/home/deepakns/Work/data/MoKDates.csv"
+  # Path to target CSV file (Year, DateRelJun01, OnsetBin, OnsetBinCode)
+  # For classification: use MoKDates_binned.csv with OnsetBinCode (0-8)
+  target_file: "/home/deepakns/Work/data/MoKDates_binned.csv"
 
   # Input variables to use from the data
   # Surface variables: sst, ttr, tcc, t2m, msl
@@ -130,6 +140,10 @@ data:
     width_shift_range: 0.1
     height_shift_range: 0.1
     horizontal_flip: true
+    # Gaussian noise augmentation (applied during training only)
+    gaussian_noise:
+      enabled: true
+      std: 0.01  # Standard deviation of noise (relative to normalized data, typical: 0.01-0.1)
 
 # Logging
 logging:
@@ -153,6 +167,7 @@ logging:
       - "batch_size-1"
       - "dropout-0.2"
       - "initial-kaiming-normal"
+      - "coarsen-to4x4"
     notes: "Training with OneCycleLR"  # Experiment notes
 
     # Logging Options

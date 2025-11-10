@@ -1,37 +1,103 @@
-# Model Configuration with Weights & Biases Enabled
-# This is an example configuration showing how to enable W&B logging
-# Copy settings to your model_config.yml or use this file directly
-
 # Model Configuration
 model:
-  name: "MoK_CNN_11p1"
-  architecture: "SpatialProcessor"
-  spatial_input_shape: [1440, 481]
+  name: "MoK_CNN_47"
+  architecture: "SpatialProcessor"  # Example architecture
+  spatial_input_shape: [1440, 481]  # 36 channels: 15 surface + 18 pressure + 1 land_sea_mask + 2 coords
   target: 1
-  dropout_rate: 0.2
+  num_classes: 1  # Number of classes for classification (0-8 for binned onset dates)
+  dropout_rate: 0.5  # Dropout probability for fc1, fc2, fc3, and fc4 layers
+
+  # Spatial Pyramid Pooling Configuration
+  spp_option: 0  # 0: max pool only, 1: avg pool only, 2: max and avg pool (concatenated)
+  spp_ops: [1, 3]  # List of output pool sizes for each pyramid level (e.g., [1, 2, 4])
+                # [1] = single 1x1 pooling (global pooling)
+                # [1, 2] = 1x1 and 2x2 pooling (multi-scale)
+                # [1, 2, 4] = 1x1, 2x2, and 4x4 pooling (full pyramid)
+
+  # Activation Function Configuration
+  activation:
+    type: "leaky_relu"  # Options: "relu", "prelu", "leaky_relu"
+    # PReLU options (only used when type="prelu")
+    prelu_mode: "channel"  # Options: "shared" (1 param), "channel" (1 param per channel)
+    # LeakyReLU options (only used when type="leaky_relu")
+    leaky_relu_slope: 0.2  # Negative slope for LeakyReLU (typical: 0.01 to 0.2)
+
+  # Weight Initialization
+  weight_init:
+    enabled: true  # If false, use PyTorch's default initialization
+    method: "xavier_uniform"  # Options: kaiming_normal, kaiming_uniform, xavier_normal, xavier_uniform, orthogonal, normal, uniform, constant, zeros, ones, default
+    activation: "leaky_relu"  # Activation function type (relu, leaky_relu, tanh, sigmoid, elu, gelu)
+    bias_init: "uniform"  # Bias initialization (zeros, constant, normal, uniform)
+    bias_value: 0.0  # Value for constant bias init
+    mode: "fan_out"  # Mode for kaiming init (fan_in or fan_out)
+    gain: 1.0  # Gain for xavier/orthogonal init
+    verbose: true  # Print initialization details
 
 # Training Configuration
 training:
-  epochs: 100
-  learning_rate: 0.001
-  optimizer: "adamw"
-  loss: "mae"
-  random_seed: 42
-  weight_decay: 0.0001
+  epochs: 100 # batch size is set in data section
+  learning_rate: 1.0e-04 # 2.8e-05 good for cnn v2
+  optimizer: "rmsprop"  # Options: "adam", "adamw", "sgd", "rmsprop"
+  loss: "mae"  # cross_entropy for multiclass classification
+  random_seed: 42  # For reproducibility
+  weight_decay: 0.0001  # L2 regularization strength (typical values: 1e-4 to 1e-5)
+
+  # Validation metric for model selection and early stopping
+  # Options: "loss" (use loss function), "mae" (Mean Absolute Error), "r2" (R-squared)
+  # For regression: "mae" or "r2" recommended (lower is better for mae, higher for r2)
+  # For classification: "loss" or "f1" (use loss)
+  val_metric: "loss"  # Metric to monitor for best model selection
+
+  # RMSprop specific parameters (only used when optimizer="rmsprop")
+  rmsprop_alpha: 0.99  # Smoothing constant for squared gradient (default: 0.99)
+  rmsprop_eps: 1.0e-8  # Term added for numerical stability (default: 1e-8)
+  rmsprop_momentum: 0.9  # Momentum factor (default: 0.0, typical: 0.9)
 
   # Learning Rate Scheduler
+  # Options: "ReduceLROnPlateau", "StepLR", "OneCycleLR", "ExponentialLR"
   lr_scheduler:
     enabled: true
-    type: "ReduceLROnPlateau"
-    mode: "min"
-    factor: 0.5
-    patience: 5
-    min_lr: 1.0e-6
-    threshold: 1.0e-4
+    type: "ReduceLROnPlateau"  # Scheduler type
+
+    # ReduceLROnPlateau: Reduce LR when metric plateaus
+    mode: "min"  # 'min' for loss, 'max' for accuracy/R2
+    factor: 0.5  # Multiply LR by this factor when reducing (new_lr = lr * factor)
+    patience: 15  # Number of epochs with no improvement before reducing LR
+    min_lr: 1.0e-6  # Minimum learning rate
+    threshold: 1.0e-4  # Threshold for measuring improvement
+    restore_best_on_reduce: true  # If true, restore model/optimizer to best epoch when LR is reduced
+
+    # StepLR: Step decay every N epochs
+    # Example config:
+    #   type: "StepLR"
+    #   step_size: 30  # Reduce LR every 30 epochs
+    #   gamma: 0.1     # LR *= 0.1 at each step
+    # ExponentialLR: Exponential decay every epoch
+    # Example config:
+    #   type: "ExponentialLR"
+    #   gamma: 0.95  # LR *= 0.95 every epoch (lr_epoch = lr_initial × gamma^epoch)
+    step_size: 30
+    gamma: 0.1
+
+    # OneCycleLR: Cyclical learning rate with warmup and annealing
+    # Example config:
+    #   type: "OneCycleLR"
+    #   max_lr: 0.1              # Peak learning rate
+    #   pct_start: 0.3           # Percent of cycle spent increasing LR (warmup)
+    #   anneal_strategy: "cos"   # 'cos' or 'linear'
+    #   div_factor: 25.0         # initial_lr = max_lr / div_factor
+    #   final_div_factor: 1e4    # final_lr = max_lr / (div_factor * final_div_factor)
+    max_lr: 0.1
+    pct_start: 0.3
+    anneal_strategy: "cos"
+    div_factor: 25.0
+    final_div_factor: 10000.0
+
+    
 
   # Callbacks
   early_stopping:
-    enabled: true
+    enabled: false
     patience: 10
     monitor: "val_loss"
 
@@ -42,29 +108,62 @@ training:
 
 # Data Configuration
 data:
+  # Path to ERA5 monthly NetCDF files
   data_dir: "/gdata2/ERA5/monthly"
-  target_file: "/home/deepakns/Work/data/MoKDates.csv"
-  input_geo_var_surf: [sst, ttr, tcc, msl]
+
+  # Path to target CSV file (Year, DateRelJun01, OnsetBin, OnsetBinCode)
+  # For classification: use MoKDates_binned.csv with OnsetBinCode (0-8)
+  target_file: "/home/deepakns/Work/data/MoKDates_binned.csv"
+
+  # Input variables to use from the data
+  # Surface variables: sst, ttr, tcc, t2m, msl
+  input_geo_var_surf: [t2m, ttr, tcc, msl]
+  # Pressure level variables: u, v, z
   input_geo_var_press: [u, v]
+
+  # Optional static channels (set to false to exclude)
   include_lat: false
   include_lon: false
   include_landsea: false
-  train_years: ["1961:2005"]
-  val_years: ["2006:2010"]
+
+  # Year specifications can be:
+  # - Single years: 1962, 1965
+  # - Ranges: "1950:1960" (inclusive, both start and end)
+  # - Mix of both: ["1950:1960", 1962, "1964:2000"]
+  train_years: ["1951:1970","1981:2010"]
+  val_years: ["1971:1980"]
   test_years: ["2011:2024"]
-  batch_size: 10
+
+  # DataLoader settings
+  batch_size: 6
   num_workers: 2
-  time_steps: [1, 2]
-  pressure_levels: [0, 1]
+
+  # Dataset settings
+  # Time step indices to load per year (each year produces ONE sample)
+  # For example, time_steps: [0, 1, 2] will load the first 3 months (e.g., Feb, Mar, Apr)
+  # Non-consecutive steps are allowed: [0, 2, 4] will load months 1, 3, 5
+  # Each time step is stacked as a separate channel
+  time_steps: [2]
+  pressure_levels: [0, 1]  # Indices of pressure levels to extract
+
+  # Normalization strategy
+  # 0: No normalization (raw data)
+  # 1: Normalize using training data statistics (spatially-varying mean/std)
+  # Future: Additional strategies can be added
   normalize_strategy: 1
+
   augmentation:
-    enabled: true
+    enabled: true # not yet active
     rotation_range: 15
     width_shift_range: 0.1
     height_shift_range: 0.1
-    horizontal_flip: true
+    horizontal_flip: true # not yet active
+    # Gaussian noise augmentation (applied during training only)
+    gaussian_noise:
+      enabled: true
+      std: 0.1  # Standard deviation of noise (relative to normalized data, typical: 0.01-0.1)
 
-# Logging Configuration
+# Logging
 logging:
   log_dir: "logs"
   tensorboard: true  # Keep TensorBoard enabled
@@ -81,10 +180,20 @@ logging:
 
     # Organization
     tags:  # Tags for organizing experiments
-      - "with-scheduler"
-      - "lr-0.001"
-      - "dropout-0.2"
-    notes: "Training with ReduceLROnPlateau scheduler"  # Experiment notes
+      - "with-scheduler-ReduceLROnPlateau"
+      - "batch_size-6"
+      - "dropout-0.5"
+      - "initial-xavier-uniform"
+      - "coarsen-to4x4"
+      - "data-augmentation-Gaussian-0.1"
+      - "LeakyReLU"
+      - "mae"
+      - "rmsprop"
+      - "t2m instead of sst"
+      - "calculate skill score"
+      - "v2 model"
+      - "val-1971-1980"
+    notes: "Training v2 with hyperparams that do well for v1"  # Experiment notes
 
     # Logging Options
     log_model: true  # Save best model checkpoint to W&B

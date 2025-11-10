@@ -196,7 +196,7 @@ class ModelCheckpoint:
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
 
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
 
         # Load model state
         model.load_state_dict(checkpoint['model_state_dict'])

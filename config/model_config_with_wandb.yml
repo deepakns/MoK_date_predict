@@ -1,18 +1,31 @@
 # Model Configuration
 model:
-  name: "MoK_CNN_47"
-  architecture: "SpatialProcessor"  # Example architecture
+  name: "MoK_CNN_57"
+  architecture: "cnn"  # Options: "cnn" (current/default), "cnn_v1" (old version), "cnn_v2" (with positional embeddings from lat/lon)
   spatial_input_shape: [1440, 481]  # 36 channels: 15 surface + 18 pressure + 1 land_sea_mask + 2 coords
   target: 1
   num_classes: 1  # Number of classes for classification (0-8 for binned onset dates)
   dropout_rate: 0.5  # Dropout probability for fc1, fc2, fc3, and fc4 layers
 
+  # CNN V2 Positional Embedding Configuration (only used when architecture="cnn_v2")
+  pos_embedding_dim: 16  # Dimension of positional embedding from lat/lon (default: 16)
+  num_frequencies: 16  # Number of sinusoidal frequencies for positional encoding (default: 16)
+
   # Spatial Pyramid Pooling Configuration
   spp_option: 0  # 0: max pool only, 1: avg pool only, 2: max and avg pool (concatenated)
-  spp_ops: [1, 3]  # List of output pool sizes for each pyramid level (e.g., [1, 2, 4])
+  spp_ops: [1, 2, 4]  # List of output pool sizes for each pyramid level (e.g., [1, 2, 4])
                 # [1] = single 1x1 pooling (global pooling)
                 # [1, 2] = 1x1 and 2x2 pooling (multi-scale)
                 # [1, 2, 4] = 1x1, 2x2, and 4x4 pooling (full pyramid)
+
+  # Normalization Configuration
+  # CNNNorm: Type of normalization to use in the CNN
+  # 0: BatchNormalization (normalizes across batch dimension)
+  # 1: LayerNormalization (normalizes across channel dimension)
+  # 2: InstanceNormalization (normalizes per sample and channel)
+  # 3: GroupNormalization (normalizes in groups of channels)
+  cnn_norm: 1  # Default: BatchNormalization
+  cnn_norm_num_groups: 32  # Number of groups for GroupNormalization (only used when cnn_norm=3)
 
   # Activation Function Configuration
   activation:
@@ -43,10 +56,16 @@ training:
   weight_decay: 0.0001  # L2 regularization strength (typical values: 1e-4 to 1e-5)
 
   # Validation metric for model selection and early stopping
-  # Options: "loss" (use loss function), "mae" (Mean Absolute Error), "r2" (R-squared)
-  # For regression: "mae" or "r2" recommended (lower is better for mae, higher for r2)
-  # For classification: "loss" or "f1" (use loss)
-  val_metric: "loss"  # Metric to monitor for best model selection
+  # Options: "loss", "mae", "rmse", "r2", "skill_score", "f1_score" (classification)
+  # For regression: "mae", "rmse", "r2", or "skill_score" recommended
+  # For classification: "loss" or "f1_score"
+  val_metric: "skill_score"  # Metric to monitor for best model selection
+
+  # Mode for validation metric (only needed for custom metrics)
+  # "min": lower is better (loss, mae, rmse)
+  # "max": higher is better (r2, skill_score, f1_score)
+  # If not specified, mode is auto-determined based on metric name
+  val_metric_mode: "max"  # Optional: specify "min" or "max", or leave blank for auto
 
   # RMSprop specific parameters (only used when optimizer="rmsprop")
   rmsprop_alpha: 0.99  # Smoothing constant for squared gradient (default: 0.99)
@@ -60,7 +79,8 @@ training:
     type: "ReduceLROnPlateau"  # Scheduler type
 
     # ReduceLROnPlateau: Reduce LR when metric plateaus
-    mode: "min"  # 'min' for loss, 'max' for accuracy/R2
+    # Note: The scheduler mode is automatically set to match val_metric_mode
+    #       No need to specify mode here - it will use the same mode as validation metric
     factor: 0.5  # Multiply LR by this factor when reducing (new_lr = lr * factor)
     patience: 15  # Number of epochs with no improvement before reducing LR
     min_lr: 1.0e-6  # Minimum learning rate
@@ -122,8 +142,11 @@ data:
   input_geo_var_press: [u, v]
 
   # Optional static channels (set to false to exclude)
-  include_lat: false
-  include_lon: false
+  # IMPORTANT: For CNN V2, lat and lon MUST be loaded (set to true) so they can be extracted
+  # and used for positional embeddings. They will be automatically removed from input channels.
+  # For CNN/CNN V1, lat and lon are included as regular input channels if set to true
+  include_lat: true
+  include_lon: true
   include_landsea: false
 
   # Year specifications can be:
@@ -143,7 +166,7 @@ data:
   # For example, time_steps: [0, 1, 2] will load the first 3 months (e.g., Feb, Mar, Apr)
   # Non-consecutive steps are allowed: [0, 2, 4] will load months 1, 3, 5
   # Each time step is stacked as a separate channel
-  time_steps: [2]
+  time_steps: [0, 1, 2]
   pressure_levels: [0, 1]  # Indices of pressure levels to extract
 
   # Normalization strategy
@@ -151,6 +174,13 @@ data:
   # 1: Normalize using training data statistics (spatially-varying mean/std)
   # Future: Additional strategies can be added
   normalize_strategy: 1
+
+  # Per-channel min-max normalization
+  # If true, applies per-channel min-max normalization [0, 1] after the normalize_strategy
+  # Can be used independently (with normalize_strategy: 0) or in combination (with normalize_strategy: 1)
+  # This normalizes each geospatial channel independently to [0, 1] range
+  # Static channels (lat, lon, land_sea_mask) are excluded from this normalization
+  add_per_channel_norm: true
 
   augmentation:
     enabled: true # not yet active
@@ -188,12 +218,20 @@ logging:
       - "data-augmentation-Gaussian-0.1"
       - "LeakyReLU"
       - "mae"
+      - "val-skill_score"
       - "rmsprop"
       - "t2m instead of sst"
       - "calculate skill score"
       - "v2 model"
       - "val-1971-1980"
-    notes: "Training v2 with hyperparams that do well for v1"  # Experiment notes
+      - "Feb+March+April"
+      - "Layer Normalization"
+      - "SPP-1-2-4"
+      - "SPP-max"
+      - "Include Lat Lon"
+      #- "Embed Dim 16"
+      - "add per channel norm"
+    notes: "Training v0 Model"  # Experiment notes
 
     # Logging Options
     log_model: true  # Save best model checkpoint to W&B

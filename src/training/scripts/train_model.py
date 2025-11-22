@@ -1,15 +1,41 @@
 """
-Main training script for the MoK_CNN_Predictor_V2 model.
+Main training script for MoK CNN models (supports cnn, cnn_v1, and cnn_v2 architectures).
 
 This script loads data from the configuration file, initializes the model,
-and trains it using the specified hyperparameters.
+and trains it using the specified hyperparameters. It supports three CNN architectures
+that can be selected via the config file's 'architecture' parameter.
 
-Model Architecture (V2):
-    - Simplified CNN with 6 convolutional blocks (stride-2 convolutions)
-    - Channel progression: input → 32 → 64 → 128 → 256 → 512 → 1024
-    - Global Average Pooling for spatial reduction
-    - Selective L2 regularization on convolutional layers only
-    - Configurable activation functions (ReLU/PReLU/LeakyReLU)
+Supported Model Architectures:
+    - cnn (current/default): Advanced CNN with residual blocks, configurable SPP,
+                             and flexible normalization. Supports lat/lon as input channels.
+
+    - cnn_v1 (old/original): Simplified CNN with 6 convolutional blocks (stride-2),
+                              channel progression: input → 32 → 64 → 128 → 256 → 512 → 1024,
+                              spatial pyramid pooling, selective L2 regularization.
+
+    - cnn_v2 (with positional embeddings): Advanced CNN that uses lat/lon coordinates
+                                            to create sinusoidal positional embeddings
+                                            (similar to Transformers) which are merged
+                                            with each input channel. Lat/lon are NOT
+                                            used as input channels but for embeddings.
+
+Normalization Options:
+    - normalize_strategy: 0 (none) or 1 (precomputed statistics)
+    - add_per_channel_norm: true/false (applies per-channel min-max [0,1] normalization)
+    - Combined: Can use precomputed stats + per-channel min-max for enhanced normalization
+
+Configuration:
+    Set architecture in config file:
+        model:
+          architecture: "cnn"     # Options: "cnn", "cnn_v1", "cnn_v2"
+          pos_embedding_dim: 16   # For cnn_v2 only
+          num_frequencies: 16     # For cnn_v2 only
+
+        data:
+          normalize_strategy: 1           # 0: none, 1: precomputed stats
+          add_per_channel_norm: true      # Add per-channel min-max normalization
+          include_lat: true               # For cnn_v2: MUST be true (used for embeddings)
+          include_lon: true               # For cnn/cnn_v1: optional input channels
 
 Usage:
     # Basic training
@@ -57,8 +83,10 @@ src_dir = training_dir.parent  # src/
 sys.path.insert(0, str(src_dir))
 
 # Import project modules
-# Import CNN V2 architecture
-from models.architectures.cnn_v2 import create_model
+# Import CNN architectures
+from models.architectures.cnn import create_model as create_model_cnn
+from models.architectures.cnn_v1 import create_model as create_model_cnn_v1
+from models.architectures.cnn_v2 import create_model as create_model_v2
 from data_pipeline.loaders.utils import load_config_and_create_dataloaders, parse_year_spec
 from data_pipeline.preprocessing.normstats import (
     compute_normalization_stats,
@@ -185,7 +213,7 @@ def get_optimizer(model: nn.Module, config: dict) -> torch.optim.Optimizer:
     return optimizer
 
 
-def get_scheduler(optimizer: torch.optim.Optimizer, config: dict, num_epochs: int = None, steps_per_epoch: int = None):
+def get_scheduler(optimizer: torch.optim.Optimizer, config: dict, num_epochs: int = None, steps_per_epoch: int = None, metric_mode: str = 'min'):
     """
     Create learning rate scheduler from configuration.
 
@@ -194,6 +222,8 @@ def get_scheduler(optimizer: torch.optim.Optimizer, config: dict, num_epochs: in
         config: Training configuration dictionary
         num_epochs: Total number of training epochs (required for OneCycleLR)
         steps_per_epoch: Number of batches per epoch (required for OneCycleLR)
+        metric_mode: Mode for metric-based schedulers ('min' or 'max')
+                     This should match the validation metric mode
 
     Returns:
         Learning rate scheduler or None if not configured
@@ -208,7 +238,9 @@ def get_scheduler(optimizer: torch.optim.Optimizer, config: dict, num_epochs: in
     restore_on_reduce = scheduler_config.get('restore_best_on_reduce', False)
 
     if scheduler_type == 'reduce_on_plateau' or scheduler_type == 'reducelronplateau':
-        mode = scheduler_config.get('mode', 'min')
+        # Use metric_mode passed from validation metric configuration
+        # This ensures scheduler and checkpoint callback use the same mode
+        mode = metric_mode
         factor = scheduler_config.get('factor', 0.5)
         patience = scheduler_config.get('patience', 5)
         min_lr = scheduler_config.get('min_lr', 1e-6)
@@ -346,6 +378,81 @@ def get_loss_function(config: dict) -> nn.Module:
     return loss_fn
 
 
+def extract_lat_lon_from_dataset(dataset) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[list]]:
+    """
+    Extract lat and lon grids from the dataset and return indices to remove.
+
+    Args:
+        dataset: Dataset instance with lat/lon data
+
+    Returns:
+        Tuple of (lat_tensor, lon_tensor, indices_to_remove) or (None, None, None) if not available
+        indices_to_remove is a list of channel indices to exclude from the input for CNN V2
+    """
+    try:
+        # Get a sample to extract lat/lon
+        sample_data, _ = dataset[0]
+        channel_info = dataset.get_channel_info()
+
+        # Check if lat and lon are in the channels
+        has_lat = dataset.include_lat
+        has_lon = dataset.include_lon
+
+        if not (has_lat and has_lon):
+            return None, None, None
+
+        # Find lat and lon channel indices
+        lat_idx = None
+        lon_idx = None
+
+        # Get metadata to find exact channel positions
+        metadata = dataset.get_metadata(0)
+        channel_names = metadata['channel_names']
+
+        for i, name in enumerate(channel_names):
+            if name == 'lat':
+                lat_idx = i
+            elif name == 'lon':
+                lon_idx = i
+
+        if lat_idx is None or lon_idx is None:
+            return None, None, None
+
+        # Extract lat and lon from sample
+        lat = sample_data[lat_idx]  # (H, W)
+        lon = sample_data[lon_idx]  # (H, W)
+
+        # Return indices to remove
+        indices_to_remove = [lat_idx, lon_idx]
+
+        return lat, lon, indices_to_remove
+    except Exception as e:
+        print(f"Warning: Could not extract lat/lon from dataset: {e}")
+        return None, None, None
+
+
+def remove_lat_lon_channels(data: torch.Tensor, indices_to_remove: list) -> torch.Tensor:
+    """
+    Remove lat and lon channels from the input data.
+
+    Args:
+        data: Input tensor of shape (B, C, H, W)
+        indices_to_remove: List of channel indices to remove
+
+    Returns:
+        Tensor with lat/lon channels removed
+    """
+    if indices_to_remove is None or len(indices_to_remove) == 0:
+        return data
+
+    # Create a mask for channels to keep
+    all_indices = set(range(data.size(1)))
+    indices_to_keep = sorted(all_indices - set(indices_to_remove))
+
+    # Select only the channels to keep
+    return data[:, indices_to_keep, :, :]
+
+
 def train_one_epoch(
     model: nn.Module,
     train_loader: DataLoader,
@@ -354,7 +461,11 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
-    gaussian_noise_std: float = 0.0
+    gaussian_noise_std: float = 0.0,
+    is_cnn_v2: bool = False,
+    lat: Optional[torch.Tensor] = None,
+    lon: Optional[torch.Tensor] = None,
+    lat_lon_indices: Optional[list] = None
 ) -> Dict[str, float]:
     """
     Train the model for one epoch.
@@ -367,6 +478,11 @@ def train_one_epoch(
         device: Device to use (cpu or cuda)
         epoch: Current epoch number
         scheduler: Optional scheduler for batch-level stepping (e.g., OneCycleLR)
+        gaussian_noise_std: Standard deviation for Gaussian noise augmentation
+        is_cnn_v2: Whether using CNN V2 architecture (requires lat/lon)
+        lat: Latitude tensor for CNN V2 (H, W)
+        lon: Longitude tensor for CNN V2 (H, W)
+        lat_lon_indices: List of channel indices for lat/lon to remove from input
 
     Returns:
         Dictionary containing training metrics
@@ -402,7 +518,21 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         # Forward pass
-        output = model(data)
+        if is_cnn_v2:
+            # CNN V2 requires lat and lon
+            if lat is None or lon is None:
+                raise ValueError("CNN V2 requires lat and lon to be provided")
+            # Remove lat/lon channels from input data
+            if lat_lon_indices is not None and len(lat_lon_indices) > 0:
+                data = remove_lat_lon_channels(data, lat_lon_indices)
+            # Prepare lat and lon for batch: expand to (B, 1, H, W)
+            batch_size = data.size(0)
+            lat_batch = lat.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1).to(device)
+            lon_batch = lon.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1).to(device)
+            output = model(data, lat_batch, lon_batch)
+        else:
+            # Standard forward pass
+            output = model(data)
 
         # Compute loss
         loss = loss_fn(output, target)
@@ -453,7 +583,11 @@ def validate(
     val_loader: DataLoader,
     loss_fn: nn.Module,
     device: torch.device,
-    train_target_mean: Optional[float] = None
+    train_target_mean: Optional[float] = None,
+    is_cnn_v2: bool = False,
+    lat: Optional[torch.Tensor] = None,
+    lon: Optional[torch.Tensor] = None,
+    lat_lon_indices: Optional[list] = None
 ) -> Dict[str, float]:
     """
     Validate the model.
@@ -464,6 +598,10 @@ def validate(
         loss_fn: Loss function
         device: Device to use (cpu or cuda)
         train_target_mean: Mean of training targets (for skill score calculation in regression)
+        is_cnn_v2: Whether using CNN V2 architecture (requires lat/lon)
+        lat: Latitude tensor for CNN V2 (H, W)
+        lon: Longitude tensor for CNN V2 (H, W)
+        lat_lon_indices: List of channel indices for lat/lon to remove from input
 
     Returns:
         Dictionary containing validation metrics
@@ -492,7 +630,21 @@ def validate(
                 target = target.long().view(-1)  # Convert to long and flatten to 1D
 
             # Forward pass
-            output = model(data)
+            if is_cnn_v2:
+                # CNN V2 requires lat and lon
+                if lat is None or lon is None:
+                    raise ValueError("CNN V2 requires lat and lon to be provided")
+                # Remove lat/lon channels from input data
+                if lat_lon_indices is not None and len(lat_lon_indices) > 0:
+                    data = remove_lat_lon_channels(data, lat_lon_indices)
+                # Prepare lat and lon for batch: expand to (B, 1, H, W)
+                batch_size = data.size(0)
+                lat_batch = lat.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1).to(device)
+                lon_batch = lon.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1).to(device)
+                output = model(data, lat_batch, lon_batch)
+            else:
+                # Standard forward pass
+                output = model(data)
 
             # Compute loss
             loss = loss_fn(output, target)
@@ -573,7 +725,11 @@ def save_predictions(
     output_path: Path,
     is_classification: bool = False,
     num_classes: int = None,
-    train_target_mean: Optional[float] = None
+    train_target_mean: Optional[float] = None,
+    is_cnn_v2: bool = False,
+    lat: Optional[torch.Tensor] = None,
+    lon: Optional[torch.Tensor] = None,
+    lat_lon_indices: Optional[list] = None
 ) -> Dict[str, float]:
     """
     Generate predictions and save to CSV file.
@@ -587,6 +743,10 @@ def save_predictions(
         is_classification: If True, output predicted classes; if False, output regression values
         num_classes: Number of classes for classification (if None, computed from data)
         train_target_mean: Mean of training targets (for skill score calculation in regression)
+        is_cnn_v2: Whether using CNN V2 architecture (requires lat/lon)
+        lat: Latitude tensor for CNN V2 (H, W)
+        lon: Longitude tensor for CNN V2 (H, W)
+        lat_lon_indices: List of channel indices for lat/lon to remove from input
 
     Returns:
         Dictionary containing evaluation metrics
@@ -608,7 +768,21 @@ def save_predictions(
             data = data.to(device)
 
             # Forward pass
-            output = model(data)
+            if is_cnn_v2:
+                # CNN V2 requires lat and lon
+                if lat is None or lon is None:
+                    raise ValueError("CNN V2 requires lat and lon to be provided")
+                # Remove lat/lon channels from input data
+                if lat_lon_indices is not None and len(lat_lon_indices) > 0:
+                    data = remove_lat_lon_channels(data, lat_lon_indices)
+                # Prepare lat and lon for batch: expand to (B, 1, H, W)
+                batch_size = data.size(0)
+                lat_batch = lat.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1).to(device)
+                lon_batch = lon.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1).to(device)
+                output = model(data, lat_batch, lon_batch)
+            else:
+                # Standard forward pass
+                output = model(data)
 
             # Get metadata for years (need to access dataset directly)
             # Calculate which samples are in this batch
@@ -766,7 +940,11 @@ def train(
     test_loader: DataLoader,
     config: dict,
     device: torch.device,
-    resume_checkpoint: str = None
+    resume_checkpoint: str = None,
+    is_cnn_v2: bool = False,
+    lat: Optional[torch.Tensor] = None,
+    lon: Optional[torch.Tensor] = None,
+    lat_lon_indices: Optional[list] = None
 ) -> None:
     """
     Main training loop.
@@ -779,6 +957,10 @@ def train(
         config: Configuration dictionary
         device: Device to use (cpu or cuda)
         resume_checkpoint: Optional path to checkpoint to resume from
+        is_cnn_v2: Whether using CNN V2 architecture (requires lat/lon)
+        lat: Latitude tensor for CNN V2 (H, W)
+        lon: Longitude tensor for CNN V2 (H, W)
+        lat_lon_indices: List of channel indices for lat/lon to remove from input
     """
     # Get training configuration
     num_epochs = config['training']['epochs']
@@ -798,23 +980,42 @@ def train(
     optimizer = get_optimizer(model, config)
     loss_fn = get_loss_function(config)
 
+    # Get validation metric from config (default to 'loss')
+    # This needs to be done BEFORE creating the scheduler
+    val_metric = config['training'].get('val_metric', 'loss')
+
+    # Get metric mode from config, or auto-determine based on metric type
+    val_metric_mode = config['training'].get('val_metric_mode', None)
+
+    if val_metric_mode:
+        # Use user-specified mode
+        metric_mode = val_metric_mode
+    else:
+        # Auto-determine mode based on metric name
+        # Higher is better for: r2, skill_score, f1_score, accuracy
+        # Lower is better for: loss, mae, rmse, mse
+        if val_metric in ['r2', 'skill_score', 'f1_score', 'accuracy']:
+            metric_mode = 'max'
+        else:
+            metric_mode = 'min'
+
     # Create learning rate scheduler
     # Note: For OneCycleLR, we need to pass num_epochs and steps_per_epoch
+    # Pass metric_mode so ReduceLROnPlateau uses the same mode as validation metric
     scheduler = get_scheduler(
         optimizer,
         config,
         num_epochs=num_epochs,
-        steps_per_epoch=len(train_loader)
+        steps_per_epoch=len(train_loader),
+        metric_mode=metric_mode
     )
 
     # Create callbacks
     model_name = config['model']['name']
 
-    # Get validation metric from config (default to 'loss')
-    val_metric = config['training'].get('val_metric', 'loss')
-
-    # Determine mode based on metric (lower is better for loss/mae, higher is better for r2)
-    metric_mode = 'max' if val_metric == 'r2' else 'min'
+    print(f"Validation metric: {val_metric} (mode: {metric_mode})")
+    print(f"Monitor metric name: val_{val_metric}")
+    print(f"Checkpoint will save when {val_metric} {'increases' if metric_mode == 'max' else 'decreases'}")
 
     # Build monitor metric name for validation
     monitor_metric = f'val_{val_metric}'
@@ -827,6 +1028,12 @@ def train(
         verbose=True,
         model_name=model_name
     )
+
+    # Verify the checkpoint callback is configured correctly
+    print(f"Checkpoint callback configured:")
+    print(f"  - Monitoring: {checkpoint_callback.monitor}")
+    print(f"  - Mode: {checkpoint_callback.mode}")
+    print(f"  - Best metric initialized to: {checkpoint_callback.best_metric}")
 
     early_stopping = EarlyStopping(
         monitor=monitor_metric,
@@ -909,7 +1116,11 @@ def train(
             device=device,
             epoch=epoch,
             scheduler=scheduler if isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR) else None,
-            gaussian_noise_std=gaussian_noise_std
+            gaussian_noise_std=gaussian_noise_std,
+            is_cnn_v2=is_cnn_v2,
+            lat=lat,
+            lon=lon,
+            lat_lon_indices=lat_lon_indices
         )
 
         # Validate
@@ -918,7 +1129,11 @@ def train(
             val_loader=val_loader,
             loss_fn=loss_fn,
             device=device,
-            train_target_mean=train_target_mean
+            train_target_mean=train_target_mean,
+            is_cnn_v2=is_cnn_v2,
+            lat=lat,
+            lon=lon,
+            lat_lon_indices=lat_lon_indices
         )
 
         # Print metrics
@@ -952,8 +1167,8 @@ def train(
 
         # Add task-specific metrics
         if 'f1_score' in train_metrics:
-            all_metrics['train_f1'] = train_metrics['f1_score']
-            all_metrics['val_f1'] = val_metrics['f1_score']
+            all_metrics['train_f1_score'] = train_metrics['f1_score']
+            all_metrics['val_f1_score'] = val_metrics['f1_score']
         else:
             all_metrics['train_rmse'] = train_metrics['rmse']
             all_metrics['val_rmse'] = val_metrics['rmse']
@@ -963,6 +1178,11 @@ def train(
                 all_metrics['val_skill_score'] = val_metrics['skill_score']
             elif 'r2' in val_metrics:
                 all_metrics['val_r2'] = val_metrics['r2']
+
+        # Ensure the monitored metric is available in all_metrics
+        # This handles cases where val_metric might use different naming conventions
+        if monitor_metric not in all_metrics and val_metric in val_metrics:
+            all_metrics[monitor_metric] = val_metrics[val_metric]
 
         # Step the learning rate scheduler (if enabled)
         if scheduler is not None:
@@ -1069,7 +1289,11 @@ def train(
         split_name='train',
         output_path=results_dir / f'{model_name}_train_predictions.csv',
         is_classification=is_classification,
-        num_classes=num_classes
+        num_classes=num_classes,
+        is_cnn_v2=is_cnn_v2,
+        lat=lat,
+        lon=lon,
+        lat_lon_indices=lat_lon_indices
     )
 
     # For regression, get training target mean for skill score calculation
@@ -1083,7 +1307,11 @@ def train(
         output_path=results_dir / f'{model_name}_val_predictions.csv',
         is_classification=is_classification,
         num_classes=num_classes,
-        train_target_mean=train_target_mean
+        train_target_mean=train_target_mean,
+        is_cnn_v2=is_cnn_v2,
+        lat=lat,
+        lon=lon,
+        lat_lon_indices=lat_lon_indices
     )
 
     test_stats = save_predictions(
@@ -1094,7 +1322,11 @@ def train(
         output_path=results_dir / f'{model_name}_test_predictions.csv',
         is_classification=is_classification,
         num_classes=num_classes,
-        train_target_mean=train_target_mean
+        train_target_mean=train_target_mean,
+        is_cnn_v2=is_cnn_v2,
+        lat=lat,
+        lon=lon,
+        lat_lon_indices=lat_lon_indices
     )
 
     # Create summary statistics file based on task type
@@ -1310,11 +1542,13 @@ def main():
     # Check normalization strategy from config
     data_config = config.get('data', {})
     normalize_strategy = data_config.get('normalize_strategy', 1)  # Default to 1 for backward compatibility
+    add_per_channel_norm = data_config.get('add_per_channel_norm', False)  # Per-channel min-max normalization
 
     print("\n" + "=" * 80)
     print("Normalization Strategy")
     print("=" * 80)
     print(f"normalize_strategy: {normalize_strategy}")
+    print(f"add_per_channel_norm: {add_per_channel_norm}")
 
     normalize_transform = None
     model_name = config['model']['name']
@@ -1354,12 +1588,29 @@ def main():
             std=norm_stats.std,
             static_channel_indices=norm_stats.static_channel_indices
         )
-        print("✓ Normalization transform created")
+        print("✓ Normalization transform created (precomputed stats)")
+
+        # Add per-channel min-max normalization if requested
+        if add_per_channel_norm:
+            from data_pipeline.preprocessing.transformers import PerChannelMinMaxNormalize, Compose
+            per_channel_transform = PerChannelMinMaxNormalize(
+                static_channel_indices=norm_stats.static_channel_indices
+            )
+            normalize_transform = Compose([normalize_transform, per_channel_transform])
+            print("✓ Added per-channel min-max normalization [0, 1]")
 
     elif normalize_strategy == 0:
-        # Strategy 0: No normalization
-        print("Strategy: No normalization (using raw data)")
-        normalize_transform = None
+        # Strategy 0: No normalization (or only per-channel min-max)
+        if add_per_channel_norm:
+            from data_pipeline.preprocessing.transformers import PerChannelMinMaxNormalize
+            # Determine static channel indices based on dataset configuration
+            # We'll get this from the dataset metadata
+            print("Strategy: Per-channel min-max normalization only (no precomputed stats)")
+            # Will set static_channel_indices after creating datasets
+            normalize_transform = None  # Will be created after we know the channel info
+        else:
+            print("Strategy: No normalization (using raw data)")
+            normalize_transform = None
 
     else:
         # Future strategies can be added here
@@ -1461,7 +1712,29 @@ def main():
         pin_memory=True
     )
 
-    normalization_status = "with normalization" if normalize_strategy == 1 else "without normalization"
+    # Handle per-channel normalization for strategy 0
+    if normalize_strategy == 0 and add_per_channel_norm:
+        from data_pipeline.preprocessing.transformers import PerChannelMinMaxNormalize
+        # Get static channel indices from dataset
+        metadata = train_dataset.get_metadata(0)
+        channel_names = metadata['channel_names']
+        static_channel_indices = []
+        for i, name in enumerate(channel_names):
+            if name in ['lat', 'lon', 'land_sea_mask']:
+                static_channel_indices.append(i)
+
+        # Create per-channel min-max transform
+        normalize_transform = PerChannelMinMaxNormalize(
+            static_channel_indices=static_channel_indices
+        )
+
+        # Update datasets with the transform
+        train_dataset.transform = normalize_transform
+        val_dataset.transform = normalize_transform
+        test_dataset.transform = normalize_transform
+        print(f"✓ Per-channel min-max normalization applied (excluding {len(static_channel_indices)} static channels)")
+
+    normalization_status = "with normalization" if normalize_strategy == 1 or (normalize_strategy == 0 and add_per_channel_norm) else "without normalization"
     print(f"✓ Dataloaders created {normalization_status}")
     print(f"  Train: {len(train_loader)} batches, {len(train_dataset)} samples")
     print(f"  Val:   {len(val_loader)} batches, {len(val_dataset)} samples")
@@ -1513,28 +1786,127 @@ def main():
     print(f"SPP pooling type: {['max only', 'avg only', 'max and avg'][spp_option]}")
     print(f"SPP pyramid levels: {spp_ops}")
 
-    model = create_model(
-        in_channels=in_channels,
-        dropout_rate=dropout_rate,
-        num_classes=num_classes,
-        activation_type=activation_type,
-        prelu_mode=prelu_mode,
-        leaky_relu_slope=leaky_relu_slope,
-        l2_reg=l2_reg,
-        spp_option=spp_option,
-        spp_ops=spp_ops
-    )
+    # Get normalization configuration
+    norm_type = config.get('model', {}).get('cnn_norm', 0)
+    norm_num_groups = config.get('model', {}).get('cnn_norm_num_groups', 32)
+    norm_names = {0: "BatchNorm", 1: "LayerNorm", 2: "InstanceNorm", 3: "GroupNorm"}
+    if norm_type == 3:
+        print(f"Normalization type: {norm_type} ({norm_names.get(norm_type, 'Unknown')}, num_groups={norm_num_groups})")
+    else:
+        print(f"Normalization type: {norm_type} ({norm_names.get(norm_type, 'Unknown')})")
+
+    # Get architecture type
+    architecture = config.get('model', {}).get('architecture', 'cnn').lower()
+    print(f"Architecture: {architecture}")
+
+    # Determine if using CNN V2
+    is_cnn_v2 = architecture == 'cnn_v2'
+
+    # For CNN V2, adjust in_channels to exclude lat/lon
+    model_in_channels = in_channels
+    if is_cnn_v2:
+        # CNN V2 uses lat/lon for positional embeddings, not as input channels
+        # Subtract lat and lon channels if they were included
+        if include_lat:
+            model_in_channels -= 1
+        if include_lon:
+            model_in_channels -= 1
+        print(f"  CNN V2: Using lat/lon for positional embeddings (not as input channels)")
+        print(f"  Model input channels: {model_in_channels} (excluding lat/lon)")
+
+    # Create model based on architecture
+    if is_cnn_v2:
+        # CNN V2 with positional embeddings
+        pos_embedding_dim = config.get('model', {}).get('pos_embedding_dim', 16)
+        num_frequencies = config.get('model', {}).get('num_frequencies', 16)
+        print(f"  Positional embedding dim: {pos_embedding_dim}")
+        print(f"  Num frequencies: {num_frequencies}")
+
+        model = create_model_v2(
+            in_channels=model_in_channels,
+            dropout_rate=dropout_rate,
+            num_classes=num_classes,
+            activation_type=activation_type,
+            prelu_mode=prelu_mode,
+            leaky_relu_slope=leaky_relu_slope,
+            l2_reg=l2_reg,
+            spp_option=spp_option,
+            spp_ops=spp_ops,
+            norm_type=norm_type,
+            norm_num_groups=norm_num_groups,
+            pos_embedding_dim=pos_embedding_dim,
+            num_frequencies=num_frequencies
+        )
+    elif architecture == 'cnn_v1':
+        # Old CNN V1 (simplified architecture)
+        print("  Using old CNN V1 model (simplified architecture)")
+        model = create_model_cnn_v1(
+            in_channels=in_channels,
+            dropout_rate=dropout_rate,
+            num_classes=num_classes,
+            activation_type=activation_type,
+            prelu_mode=prelu_mode,
+            leaky_relu_slope=leaky_relu_slope,
+            l2_reg=l2_reg,
+            spp_option=spp_option,
+            spp_ops=spp_ops,
+            norm_type=norm_type,
+            norm_num_groups=norm_num_groups
+        )
+    else:
+        # CNN (current/default architecture)
+        print("  Using current CNN model (default)")
+        model = create_model_cnn(
+            in_channels=in_channels,
+            dropout_rate=dropout_rate,
+            num_classes=num_classes,
+            activation_type=activation_type,
+            prelu_mode=prelu_mode,
+            leaky_relu_slope=leaky_relu_slope,
+            l2_reg=l2_reg,
+            spp_option=spp_option,
+            spp_ops=spp_ops,
+            norm_type=norm_type,
+            norm_num_groups=norm_num_groups
+        )
+
     model = model.to(device)
 
     # Get spatial dimensions from first batch
     sample_data, _ = train_dataset[0]
     _, spatial_h, spatial_w = sample_data.shape
 
+    # Extract lat/lon for CNN V2
+    lat_tensor = None
+    lon_tensor = None
+    lat_lon_indices = None
+    if is_cnn_v2:
+        print("Extracting lat/lon from dataset for CNN V2...")
+        lat_tensor, lon_tensor, lat_lon_indices = extract_lat_lon_from_dataset(train_dataset)
+        if lat_tensor is None or lon_tensor is None:
+            raise ValueError(
+                "CNN V2 requires lat and lon to be loaded from the dataset. "
+                "Set include_lat=true and include_lon=true in the config. "
+                "The lat/lon grids will be extracted for positional embeddings and "
+                "automatically removed from the input channels."
+            )
+        print(f"  Lat shape: {lat_tensor.shape}")
+        print(f"  Lon shape: {lon_tensor.shape}")
+        print(f"  Lat/Lon channel indices to remove from input: {lat_lon_indices}")
+
     # Initialize lazy modules with a dummy forward pass
     print("Initializing lazy modules...")
-    dummy_input = torch.randn(1, in_channels, spatial_h, spatial_w).to(device)
-    with torch.no_grad():
-        _ = model(dummy_input)
+    if is_cnn_v2:
+        # CNN V2 requires lat and lon for forward pass
+        dummy_input = torch.randn(1, model_in_channels, spatial_h, spatial_w).to(device)
+        dummy_lat = lat_tensor.unsqueeze(0).unsqueeze(0).to(device)  # Add batch and channel dimensions -> (1, 1, H, W)
+        dummy_lon = lon_tensor.unsqueeze(0).unsqueeze(0).to(device)
+        with torch.no_grad():
+            _ = model(dummy_input, dummy_lat, dummy_lon)
+    else:
+        dummy_input = torch.randn(1, in_channels, spatial_h, spatial_w).to(device)
+        with torch.no_grad():
+            _ = model(dummy_input)
     print("Lazy modules initialized.")
 
     # Initialize weights if specified in config
@@ -1579,7 +1951,11 @@ def main():
         test_loader=test_loader,
         config=config,
         device=device,
-        resume_checkpoint=args.resume
+        resume_checkpoint=args.resume,
+        is_cnn_v2=is_cnn_v2,
+        lat=lat_tensor,
+        lon=lon_tensor,
+        lat_lon_indices=lat_lon_indices
     )
 
 

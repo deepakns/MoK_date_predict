@@ -3,6 +3,41 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def get_normalization_layer(norm_type: int, num_features: int, num_groups: int = 32):
+    """
+    Factory function to create normalization layers based on norm_type.
+
+    Args:
+        norm_type: Type of normalization
+            0: BatchNormalization - normalizes across batch dimension
+            1: LayerNormalization - normalizes across channel dimension
+            2: InstanceNormalization - normalizes per sample and channel
+            3: GroupNormalization - normalizes in groups of channels
+        num_features: Number of channels/features to normalize
+        num_groups: Number of groups for GroupNorm (default: 32)
+
+    Returns:
+        nn.Module: Appropriate normalization layer
+    """
+    if norm_type == 0:
+        # BatchNormalization - standard for CNNs
+        return nn.BatchNorm2d(num_features)
+    elif norm_type == 1:
+        # LayerNormalization - normalizes over [C, H, W] dimensions
+        # Note: For 2D data, we normalize over channels, height, and width
+        return nn.GroupNorm(1, num_features)  # GroupNorm with 1 group = LayerNorm for CNNs
+    elif norm_type == 2:
+        # InstanceNormalization - normalizes per sample, per channel
+        return nn.InstanceNorm2d(num_features, affine=True)
+    elif norm_type == 3:
+        # GroupNormalization - divides channels into groups and normalizes within groups
+        # Adjust num_groups if it's larger than num_features
+        actual_groups = min(num_groups, num_features)
+        return nn.GroupNorm(actual_groups, num_features)
+    else:
+        raise ValueError(f"Invalid norm_type: {norm_type}. Must be 0 (Batch), 1 (Layer), 2 (Instance), or 3 (Group).")
+
+
 class SpatialPyramidPooling(nn.Module):
     """
     Spatial Pyramid Pooling layer that outputs a fixed-length representation
@@ -52,7 +87,7 @@ class SpatialPyramidPooling(nn.Module):
 
 class ResSpatialProcessorBlock(nn.Module):
     """Residual Block to process stacked variables"""
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, norm_type=0, norm_num_groups=32):
         super().__init__() # Required by PyTorch to call the init constructor of the parent class nn.Module so that all layers defined here are tracked correctly
 
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size = kernel_size, stride = stride,
@@ -60,7 +95,7 @@ class ResSpatialProcessorBlock(nn.Module):
         # conv1 is an instance variable that stores a 2D convolution operation. Use self.conv1 allows us to use conv1 throughout the class ResSpatialProcessorBlock.
         # When stride = 1 is used, there is no spatial reduction. Using padding=1 ensures that input and output size are equal. If padding=0, the kernel_size will reduce the spatial dimension
         # bias = False is set so that when a batch normalization is used after the conv1 with a bias term, there is no redundancy of variables
-        self.bn1 = nn.BatchNorm2d(out_channels) # scales the input to bn1 such that mean = 0, std = 1 and then scales it tby gamma and shifts it by beta, both learnable
+        self.bn1 = get_normalization_layer(norm_type, out_channels, norm_num_groups) # Configurable normalization layer
         self.relu = nn.ReLU (inplace = True)  # inplace=True modifies the input tensor directly in memory (saves memory); generally inplace=False is safer as it creates a new tensor
 
         # Now repeat conv, bn. ReLU can be reused as it has no learnable parameters (it is simply a function application)
@@ -68,7 +103,7 @@ class ResSpatialProcessorBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size = kernel_size, stride = stride,
                                padding=1, bias=False)
 
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.bn2 = get_normalization_layer(norm_type, out_channels, norm_num_groups) # Configurable normalization layer
 
         # define the skip connection and ensure that skip connection works even with dimensions change in conv1 and conv2
 
@@ -76,7 +111,7 @@ class ResSpatialProcessorBlock(nn.Module):
         if stride != 1 or in_channels != out_channels:
             self.skip = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, kernel_size = 1, stride=stride, bias=False), # this performs 1x1 convolution that changes the number of channels. padding is not needed as kernel_size is 1
-                nn.BatchNorm2d(out_channels)
+                get_normalization_layer(norm_type, out_channels, norm_num_groups) # Configurable normalization layer
             )
 
 
@@ -133,7 +168,8 @@ class MoK_CNN_Predictor(nn.Module):
 
     def __init__(self, in_channels: int = 36, dropout_rate: float = 0.5, num_classes: int = 1,
                  activation_type: str = "relu", prelu_mode: str = "shared", leaky_relu_slope: float = 0.01,
-                 l2_reg: float = 0.0001, spp_option: int = 2, spp_ops: list = [1]):
+                 l2_reg: float = 0.0001, spp_option: int = 2, spp_ops: list = [1], norm_type: int = 0,
+                 norm_num_groups: int = 32):
         """
         Args:
             in_channels: Number of input channels
@@ -147,12 +183,16 @@ class MoK_CNN_Predictor(nn.Module):
                     Typical values: 1e-4 to 1e-5
             spp_option: Spatial Pyramid Pooling type (0: max only, 1: avg only, 2: both)
             spp_ops: List of output pool sizes for pyramid levels (e.g., [1], [1, 2], [1, 2, 4])
+            norm_type: Type of normalization (0: Batch, 1: Layer, 2: Instance, 3: Group)
+            norm_num_groups: Number of groups for GroupNormalization (default: 32, only used when norm_type=3)
         """
         super().__init__() # call the constructor of nn.Module to ensure all params are tracked
 
         self.num_classes = num_classes  # Store for forward pass logic
         self.activation_type = activation_type
         self.l2_reg = l2_reg  # Store for reference (actual application is via optimizer)
+        self.norm_type = norm_type  # Store normalization type
+        self.norm_num_groups = norm_num_groups  # Store num_groups for GroupNorm
 
         # Coarsening avg pool layer before processing (4x4 kernel with stride 4)
         # Reduces spatial dimensions: 1440x481 -> 360x120
@@ -165,7 +205,7 @@ class MoK_CNN_Predictor(nn.Module):
 
         self.conv1 = nn.Conv2d(in_channels = in_channels, out_channels = in_channels, groups = 1, kernel_size = 3, padding = 1, bias = False )
         self.conv2 = nn.Conv2d(in_channels = in_channels, out_channels = 64, kernel_size = 1, bias = False )
-        self.bn1 = nn.BatchNorm2d(num_features = 64)
+        self.bn1 = get_normalization_layer(norm_type, num_features = 64, num_groups = norm_num_groups)
 
         # Create activation functions based on type
         if activation_type == "prelu":
@@ -190,16 +230,16 @@ class MoK_CNN_Predictor(nn.Module):
         # Keep ReLU for use in residual blocks
         self.relu = nn.ReLU(inplace=True)
 
-        self.process_block1 = ResSpatialProcessorBlock(64, 64)
+        self.process_block1 = ResSpatialProcessorBlock(64, 64, norm_type=norm_type, norm_num_groups=norm_num_groups)
         self.maxpool1 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.process_block2 = ResSpatialProcessorBlock(64, 128)
+        self.process_block2 = ResSpatialProcessorBlock(64, 128, norm_type=norm_type, norm_num_groups=norm_num_groups)
         self.maxpool2 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.process_block3 = ResSpatialProcessorBlock(128, 128)
+        self.process_block3 = ResSpatialProcessorBlock(128, 128, norm_type=norm_type, norm_num_groups=norm_num_groups)
         self.maxpool3 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.process_block4 = ResSpatialProcessorBlock(128, 256)
+        self.process_block4 = ResSpatialProcessorBlock(128, 256, norm_type=norm_type, norm_num_groups=norm_num_groups)
 
         # Spatial Pyramid Pooling replaces AdaptiveAvgPool2d
         # Output features depend on spp_ops and spp_option
@@ -326,7 +366,8 @@ class MoK_CNN_Predictor(nn.Module):
 # In the simple implementation this function is not needed
 def create_model(in_channels: int = 36, dropout_rate: float = 0.5, num_classes: int = 1,
                  activation_type: str = "relu", prelu_mode: str = "shared", leaky_relu_slope: float = 0.01,
-                 l2_reg: float = 0.0001, spp_option: int = 2, spp_ops: list = [1]):
+                 l2_reg: float = 0.0001, spp_option: int = 2, spp_ops: list = [1], norm_type: int = 0,
+                 norm_num_groups: int = 32):
     """
     Create a MoK_CNN_Predictor model with specified number of input channels, dropout rate, and output classes.
 
@@ -343,6 +384,8 @@ def create_model(in_channels: int = 36, dropout_rate: float = 0.5, num_classes: 
         l2_reg: L2 regularization strength (default: 0.0001, typical: 1e-4 to 1e-5)
         spp_option: Spatial Pyramid Pooling type (0: max only, 1: avg only, 2: both max and avg)
         spp_ops: List of output pool sizes for pyramid levels (e.g., [1], [1, 2], [1, 2, 4])
+        norm_type: Type of normalization (0: Batch, 1: Layer, 2: Instance, 3: Group)
+        norm_num_groups: Number of groups for GroupNormalization (default: 32, only used when norm_type=3)
 
     Returns:
         MoK_CNN_Predictor model instance
@@ -361,7 +404,9 @@ def create_model(in_channels: int = 36, dropout_rate: float = 0.5, num_classes: 
         leaky_relu_slope=leaky_relu_slope,
         l2_reg=l2_reg,
         spp_option=spp_option,
-        spp_ops=spp_ops
+        spp_ops=spp_ops,
+        norm_type=norm_type,
+        norm_num_groups=norm_num_groups
     )
     return model
         
@@ -389,6 +434,8 @@ def test():
     dropout_rate = 0.5  # Default
     in_channels = 36  # Default
     spatial_shape = [1440, 481]  # Default
+    norm_type = 0  # Default: BatchNormalization
+    norm_num_groups = 32  # Default: 32 groups for GroupNorm
 
     try:
         with open(config_path, 'r') as f:
@@ -397,6 +444,8 @@ def test():
             num_classes = config.get('model', {}).get('num_classes', 1)
             dropout_rate = config.get('model', {}).get('dropout_rate', 0.5)
             spatial_shape = config.get('model', {}).get('spatial_input_shape', [1440, 481])
+            norm_type = config.get('model', {}).get('cnn_norm', 0)
+            norm_num_groups = config.get('model', {}).get('cnn_norm_num_groups', 32)
 
             # Calculate number of input channels based on data configuration
             data_config = config.get('data', {})
@@ -419,6 +468,13 @@ def test():
             print(f"  Pressure vars: {pressure_vars} (× {len(pressure_levels)} levels × {len(time_steps)} time steps = {num_pressure_channels} channels)")
             print(f"  Static channels: {num_static_channels} (lat={include_lat}, lon={include_lon}, landsea={include_landsea})")
             print(f"  Total input channels: {in_channels}")
+
+            # Get normalization type name for display
+            norm_names = {0: "BatchNorm", 1: "LayerNorm", 2: "InstanceNorm", 3: "GroupNorm"}
+            if norm_type == 3:
+                print(f"  Normalization type: {norm_type} ({norm_names.get(norm_type, 'Unknown')}, num_groups={norm_num_groups})")
+            else:
+                print(f"  Normalization type: {norm_type} ({norm_names.get(norm_type, 'Unknown')})")
             print()
 
     except Exception as e:
@@ -442,7 +498,7 @@ def test():
     except:
         pass
 
-    model_reg = MoK_CNN_Predictor(in_channels=in_channels, num_classes=1, l2_reg=l2_reg)
+    model_reg = MoK_CNN_Predictor(in_channels=in_channels, num_classes=1, l2_reg=l2_reg, norm_type=norm_type, norm_num_groups=norm_num_groups)
     input = torch.randn(2, in_channels, spatial_shape[0], spatial_shape[1])
     output_reg = model_reg(input)
 
@@ -464,7 +520,7 @@ def test():
         print("\n" + "="*60)
         print(f"Testing Classification Model (num_classes={num_classes}):")
         print("-" * 60)
-        model_cls = MoK_CNN_Predictor(in_channels=in_channels, num_classes=num_classes)
+        model_cls = MoK_CNN_Predictor(in_channels=in_channels, num_classes=num_classes, norm_type=norm_type, norm_num_groups=norm_num_groups)
         output_cls = model_cls(input)
 
         print(f"Input shape: {input.shape}")

@@ -112,21 +112,36 @@ class NormalizeWithPrecomputedStats:
         Returns:
             Normalized tensor of same shape, with static channels unchanged
         """
-        if tensor.shape != self.mean.shape:
+        # Check spatial dimensions match
+        if tensor.shape[1:] != self.mean.shape[1:]:
             raise ValueError(
-                f"Input tensor shape {tensor.shape} does not match "
-                f"statistics shape {self.mean.shape}"
+                f"Input tensor spatial dimensions {tensor.shape[1:]} do not match "
+                f"statistics spatial dimensions {self.mean.shape[1:]}"
+            )
+
+        # Handle case where input has more channels than statistics
+        # (e.g., when lat/lon are added after statistics were computed)
+        num_stats_channels = self.mean.shape[0]
+        num_input_channels = tensor.shape[0]
+
+        if num_input_channels < num_stats_channels:
+            raise ValueError(
+                f"Input tensor has {num_input_channels} channels but "
+                f"statistics were computed for {num_stats_channels} channels. "
+                f"Cannot normalize."
             )
 
         # Create a copy to avoid modifying the input
         normalized = tensor.clone()
 
-        # Normalize all channels except static ones
-        for channel_idx in range(tensor.shape[0]):
+        # Normalize channels that have corresponding statistics
+        for channel_idx in range(num_stats_channels):
             if channel_idx not in self.static_channel_indices:
                 normalized[channel_idx] = (
                     tensor[channel_idx] - self.mean[channel_idx]
                 ) / (self.std[channel_idx] + 1e-8)
+
+        # Channels beyond num_stats_channels are left unchanged (e.g., lat/lon)
 
         return normalized
 
@@ -155,6 +170,62 @@ class NormalizeWithPrecomputedStats:
             std=stats.std,
             static_channel_indices=stats.static_channel_indices
         )
+
+
+class PerChannelMinMaxNormalize:
+    """
+    Per-channel min-max normalization to [0, 1] range.
+
+    This transform applies min-max normalization independently to each channel,
+    normalizing each geospatial channel to [0, 1] based on its own min and max values.
+    Static channels (lat, lon, land_sea_mask) are excluded from normalization.
+
+    This can be used:
+    - After precomputed statistics normalization for enhanced normalization
+    - Independently (without precomputed stats) for simple min-max scaling
+    """
+
+    def __init__(self, static_channel_indices: list = None):
+        """
+        Initialize per-channel min-max normalizer.
+
+        Args:
+            static_channel_indices: List of channel indices to exclude from normalization
+                                   (e.g., lat, lon, land_sea_mask channels)
+        """
+        self.static_channel_indices = static_channel_indices or []
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Apply per-channel min-max normalization.
+
+        Args:
+            tensor: Input tensor of shape (channels, lat, lon)
+
+        Returns:
+            Normalized tensor with each non-static channel scaled to [0, 1]
+        """
+        # Create a copy to avoid modifying the input
+        normalized = tensor.clone()
+
+        # Normalize each channel independently (except static ones)
+        for channel_idx in range(tensor.shape[0]):
+            if channel_idx not in self.static_channel_indices:
+                channel_data = tensor[channel_idx]
+
+                # Compute min and max for this channel
+                min_val = channel_data.min()
+                max_val = channel_data.max()
+
+                # Avoid division by zero
+                if max_val - min_val > 1e-8:
+                    normalized[channel_idx] = (channel_data - min_val) / (max_val - min_val)
+                else:
+                    # If channel is constant, set to 0
+                    normalized[channel_idx] = 0.0
+
+        # Static channels remain unchanged
+        return normalized
 
 
 class MinMaxScale:

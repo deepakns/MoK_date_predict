@@ -16,12 +16,14 @@ The scheduler is configured in [config/model_config.yml](config/model_config.yml
 lr_scheduler:
   enabled: true
   type: "ReduceLROnPlateau"
-  mode: "min"              # 'min' for loss, 'max' for accuracy/R2
+  # Note: Mode is automatically set to match val_metric_mode
   factor: 0.5              # Multiply LR by this factor when reducing
   patience: 5              # Number of epochs with no improvement before reducing LR
   min_lr: 1.0e-6           # Minimum learning rate
   threshold: 1.0e-4        # Threshold for measuring improvement
 ```
+
+**Important**: The scheduler's mode (min/max) is automatically determined from the `val_metric_mode` configuration. This ensures the scheduler and checkpoint callback always use the same mode for metric tracking.
 
 ### Key Parameters
 
@@ -29,11 +31,12 @@ lr_scheduler:
 |-----------|--------------|-------------|
 | `enabled` | `true` | Enable/disable the scheduler |
 | `type` | `"ReduceLROnPlateau"` | Type of scheduler to use |
-| `mode` | `"min"` | `min` for loss metrics, `max` for accuracy metrics |
 | `factor` | `0.5` | Multiplicative factor for LR reduction (new_lr = lr × factor) |
 | `patience` | `5` | Number of epochs to wait before reducing LR |
 | `min_lr` | `1.0e-6` | Minimum learning rate threshold |
 | `threshold` | `1.0e-4` | Minimum change in metric to qualify as improvement |
+
+**Note**: The `mode` parameter is no longer configurable in the scheduler section. It is automatically inherited from `training.val_metric_mode` to ensure consistency between scheduler and checkpoint callback.
 
 ## How It Works
 

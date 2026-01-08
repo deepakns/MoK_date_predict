@@ -156,9 +156,13 @@ class ModelCheckpoint:
             checkpoint_path: Path to save checkpoint
             scheduler: Optional scheduler
         """
+        # Filter out internal PyTorch keys that start with '_'
+        model_state = model.state_dict()
+        filtered_model_state = {k: v for k, v in model_state.items() if not k.startswith('_')}
+
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': filtered_model_state,
             'optimizer_state_dict': optimizer.state_dict(),
             'metrics': metrics,
             'best_metric': self.best_metric,

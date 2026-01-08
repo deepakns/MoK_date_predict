@@ -96,6 +96,7 @@ from data_pipeline.preprocessing.normstats import (
 )
 from data_pipeline.preprocessing.transformers import NormalizeWithPrecomputedStats
 from data_pipeline.loaders.dataset_classes.monthly_dataset import MonthlyERA5Dataset
+from data_pipeline.loaders.dataset_classes.era5_raw_dataset import ERA5RawDataset
 from training.callbacks import ModelCheckpoint, EarlyStopping, TensorBoardLogger, WandBLogger
 from training.utils.lr_scheduler import ReduceLROnPlateauWithRestore
 from training.utils.weight_init import initialize_weights
@@ -1087,13 +1088,38 @@ def train(
     is_classification = num_classes > 1
 
     if not is_classification:
-        # Compute mean of training targets
+        # Compute mean of training targets efficiently from CSV file
+        # This is much faster than iterating through the entire DataLoader
         print("\nComputing training target mean for skill score calculation...")
-        all_train_targets = []
-        for _, target in train_loader:
-            all_train_targets.extend(target.numpy().flatten().tolist())
-        train_target_mean = np.mean(all_train_targets)
-        print(f"Training target mean: {train_target_mean:.4f}")
+
+        target_file = config['data']['target_file']
+        train_years_spec = config['data']['train_years']
+        train_years = parse_year_spec(train_years_spec)
+
+        # Read target CSV and filter for training years
+        targets_df = pd.read_csv(target_file)
+        train_targets_df = targets_df[targets_df['Year'].isin(train_years)]
+
+        if len(train_targets_df) == 0:
+            print(f"WARNING: No training samples found in target file for specified years")
+            print(f"Available years in CSV: {sorted(targets_df['Year'].unique())}")
+            print("Falling back to using entire dataset mean for skill score calculation")
+            train_targets_df = targets_df
+
+        # Get the target column - use DateRelJun01 by default, or check model config
+        target_idx = config.get('model', {}).get('target', None)
+
+        if isinstance(target_idx, int) and target_idx < len(targets_df.columns):
+            # Use the specified column index (1-indexed in config maps to 0-indexed in DataFrame)
+            target_col = targets_df.columns[target_idx]
+        elif 'DateRelJun01' in train_targets_df.columns:
+            target_col = 'DateRelJun01'
+        else:
+            # Fallback to second column
+            target_col = train_targets_df.columns[1]
+
+        train_target_mean = train_targets_df[target_col].mean()
+        print(f"Training target mean: {train_target_mean:.4f} (from {len(train_targets_df)} samples in column '{target_col}')")
 
     # Training loop
     print("\n" + "=" * 80)
@@ -1638,51 +1664,118 @@ def main():
     include_lon = data_config.get('include_lon', True)
     include_landsea = data_config.get('include_landsea', True)
 
-    # Create datasets with optional normalization
-    train_dataset = MonthlyERA5Dataset(
-        data_dir=data_config.get('data_dir', '/gdata2/ERA5/monthly'),
-        years=train_years,
-        time_steps=time_steps,
-        num_time_steps=num_time_steps,  # Fallback for backward compatibility
-        pressure_levels=data_config.get('pressure_levels', [0, 1]),
-        target_file=data_config.get('target_file', None),
-        transform=normalize_transform,  # None if strategy=0
-        input_geo_var_surf=input_geo_var_surf,
-        input_geo_var_press=input_geo_var_press,
-        include_lat=include_lat,
-        include_lon=include_lon,
-        include_landsea=include_landsea
-    )
+    # Get dataset type
+    dataset_type = data_config.get('dataset_type', 'preprocessed')
 
-    val_dataset = MonthlyERA5Dataset(
-        data_dir=data_config.get('data_dir', '/gdata2/ERA5/monthly'),
-        years=val_years,
-        time_steps=time_steps,
-        num_time_steps=num_time_steps,  # Fallback for backward compatibility
-        pressure_levels=data_config.get('pressure_levels', [0, 1]),
-        target_file=data_config.get('target_file', None),
-        transform=normalize_transform,  # None if strategy=0
-        input_geo_var_surf=input_geo_var_surf,
-        input_geo_var_press=input_geo_var_press,
-        include_lat=include_lat,
-        include_lon=include_lon,
-        include_landsea=include_landsea
-    )
+    # Create datasets based on type
+    if dataset_type == 'raw':
+        # Raw 6-hourly data with temporal aggregation
+        print(f"Using raw ERA5 dataset with temporal_aggregation: {data_config.get('temporal_aggregation', 'daily')}")
 
-    test_dataset = MonthlyERA5Dataset(
-        data_dir=data_config.get('data_dir', '/gdata2/ERA5/monthly'),
-        years=test_years,
-        time_steps=time_steps,
-        num_time_steps=num_time_steps,  # Fallback for backward compatibility
-        pressure_levels=data_config.get('pressure_levels', [0, 1]),
-        target_file=data_config.get('target_file', None),
-        transform=normalize_transform,  # None if strategy=0
-        input_geo_var_surf=input_geo_var_surf,
-        input_geo_var_press=input_geo_var_press,
-        include_lat=include_lat,
-        include_lon=include_lon,
-        include_landsea=include_landsea
-    )
+        # Get source directory mappings
+        input_geo_var_surf_src = data_config.get('input_geo_var_surf_src', None)
+        input_geo_var_press_src = data_config.get('input_geo_var_press_src', None)
+        temporal_aggregation = data_config.get('temporal_aggregation', 'daily')
+
+        train_dataset = ERA5RawDataset(
+            base_dir=data_config.get('data_dir', '/gdata2/ERA5'),
+            years=train_years,
+            time_steps=time_steps,
+            temporal_aggregation=temporal_aggregation,
+            pressure_levels=data_config.get('pressure_levels', [0, 1]),
+            target_file=data_config.get('target_file', None),
+            transform=normalize_transform,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            input_geo_var_surf_src=input_geo_var_surf_src,
+            input_geo_var_press_src=input_geo_var_press_src,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea
+        )
+
+        val_dataset = ERA5RawDataset(
+            base_dir=data_config.get('data_dir', '/gdata2/ERA5'),
+            years=val_years,
+            time_steps=time_steps,
+            temporal_aggregation=temporal_aggregation,
+            pressure_levels=data_config.get('pressure_levels', [0, 1]),
+            target_file=data_config.get('target_file', None),
+            transform=normalize_transform,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            input_geo_var_surf_src=input_geo_var_surf_src,
+            input_geo_var_press_src=input_geo_var_press_src,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea
+        )
+
+        test_dataset = ERA5RawDataset(
+            base_dir=data_config.get('data_dir', '/gdata2/ERA5'),
+            years=test_years,
+            time_steps=time_steps,
+            temporal_aggregation=temporal_aggregation,
+            pressure_levels=data_config.get('pressure_levels', [0, 1]),
+            target_file=data_config.get('target_file', None),
+            transform=normalize_transform,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            input_geo_var_surf_src=input_geo_var_surf_src,
+            input_geo_var_press_src=input_geo_var_press_src,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea
+        )
+
+    else:  # dataset_type == 'preprocessed' (default)
+        # Preprocessed monthly or weekly data
+        print("Using preprocessed ERA5 dataset (monthly or weekly)")
+
+        train_dataset = MonthlyERA5Dataset(
+            data_dir=data_config.get('data_dir', '/gdata2/ERA5/monthly'),
+            years=train_years,
+            time_steps=time_steps,
+            num_time_steps=num_time_steps,  # Fallback for backward compatibility
+            pressure_levels=data_config.get('pressure_levels', [0, 1]),
+            target_file=data_config.get('target_file', None),
+            transform=normalize_transform,  # None if strategy=0
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea
+        )
+
+        val_dataset = MonthlyERA5Dataset(
+            data_dir=data_config.get('data_dir', '/gdata2/ERA5/monthly'),
+            years=val_years,
+            time_steps=time_steps,
+            num_time_steps=num_time_steps,  # Fallback for backward compatibility
+            pressure_levels=data_config.get('pressure_levels', [0, 1]),
+            target_file=data_config.get('target_file', None),
+            transform=normalize_transform,  # None if strategy=0
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea
+        )
+
+        test_dataset = MonthlyERA5Dataset(
+            data_dir=data_config.get('data_dir', '/gdata2/ERA5/monthly'),
+            years=test_years,
+            time_steps=time_steps,
+            num_time_steps=num_time_steps,  # Fallback for backward compatibility
+            pressure_levels=data_config.get('pressure_levels', [0, 1]),
+            target_file=data_config.get('target_file', None),
+            transform=normalize_transform,  # None if strategy=0
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea
+        )
 
     # Create dataloaders
     batch_size = data_config.get('batch_size', 32)
@@ -1745,8 +1838,15 @@ def main():
     in_channels = channel_info['num_channels']
     print(f"\nDataset configuration:")
     print(f"  Total channels: {in_channels}")
-    print(f"  Time steps: {channel_info['time_steps']}")
-    print(f"  Pressure levels: {channel_info['pressure_levels']}")
+    # Some datasets may not have time_steps/pressure_levels in channel_info
+    if 'time_steps' in channel_info:
+        print(f"  Time steps: {channel_info['time_steps']}")
+    else:
+        print(f"  Time steps: {time_steps}")
+    if 'pressure_levels' in channel_info:
+        print(f"  Pressure levels: {channel_info['pressure_levels']}")
+    else:
+        print(f"  Pressure levels: {data_config.get('pressure_levels', [0, 1])}")
 
     # Create model
     print("\n" + "=" * 80)

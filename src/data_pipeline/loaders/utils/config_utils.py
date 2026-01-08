@@ -113,6 +113,7 @@ def load_config_and_create_dataloaders(
     """
     # Import here to avoid circular imports
     from data_pipeline.loaders.dataset_classes.monthly_dataset import MonthlyERA5Dataset
+    from data_pipeline.loaders.dataset_classes.era5_raw_dataset import ERA5RawDataset
     import torch.utils.data
 
     # Load YAML config
@@ -156,51 +157,113 @@ def load_config_and_create_dataloaders(
     num_classes = model_config.get('num_classes', 1)
     is_classification = num_classes > 1  # If num_classes > 1, it's classification
 
-    # Create datasets
-    train_dataset = MonthlyERA5Dataset(
-        data_dir=data_dir,
-        years=train_years,
-        time_steps=time_steps,
-        num_time_steps=num_time_steps,  # Fallback for backward compatibility
-        pressure_levels=pressure_levels,
-        target_file=target_file,
-        input_geo_var_surf=input_geo_var_surf,
-        input_geo_var_press=input_geo_var_press,
-        include_lat=include_lat,
-        include_lon=include_lon,
-        include_landsea=include_landsea,
-        is_classification=is_classification
-    )
+    # Get dataset type
+    dataset_type = data_config.get('dataset_type', 'preprocessed')
 
-    val_dataset = MonthlyERA5Dataset(
-        data_dir=data_dir,
-        years=val_years,
-        time_steps=time_steps,
-        num_time_steps=num_time_steps,  # Fallback for backward compatibility
-        pressure_levels=pressure_levels,
-        target_file=target_file,
-        input_geo_var_surf=input_geo_var_surf,
-        input_geo_var_press=input_geo_var_press,
-        include_lat=include_lat,
-        include_lon=include_lon,
-        include_landsea=include_landsea,
-        is_classification=is_classification
-    )
+    # Create datasets based on type
+    if dataset_type == 'raw':
+        # Raw 6-hourly data with temporal aggregation
+        input_geo_var_surf_src = data_config.get('input_geo_var_surf_src', None)
+        input_geo_var_press_src = data_config.get('input_geo_var_press_src', None)
+        temporal_aggregation = data_config.get('temporal_aggregation', 'daily')
 
-    test_dataset = MonthlyERA5Dataset(
-        data_dir=data_dir,
-        years=test_years,
-        time_steps=time_steps,
-        num_time_steps=num_time_steps,  # Fallback for backward compatibility
-        pressure_levels=pressure_levels,
-        target_file=target_file,
-        input_geo_var_surf=input_geo_var_surf,
-        input_geo_var_press=input_geo_var_press,
-        include_lat=include_lat,
-        include_lon=include_lon,
-        include_landsea=include_landsea,
-        is_classification=is_classification
-    )
+        train_dataset = ERA5RawDataset(
+            base_dir=data_dir,
+            years=train_years,
+            time_steps=time_steps,
+            temporal_aggregation=temporal_aggregation,
+            pressure_levels=pressure_levels,
+            target_file=target_file,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            input_geo_var_surf_src=input_geo_var_surf_src,
+            input_geo_var_press_src=input_geo_var_press_src,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea,
+            is_classification=is_classification
+        )
+
+        val_dataset = ERA5RawDataset(
+            base_dir=data_dir,
+            years=val_years,
+            time_steps=time_steps,
+            temporal_aggregation=temporal_aggregation,
+            pressure_levels=pressure_levels,
+            target_file=target_file,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            input_geo_var_surf_src=input_geo_var_surf_src,
+            input_geo_var_press_src=input_geo_var_press_src,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea,
+            is_classification=is_classification
+        )
+
+        test_dataset = ERA5RawDataset(
+            base_dir=data_dir,
+            years=test_years,
+            time_steps=time_steps,
+            temporal_aggregation=temporal_aggregation,
+            pressure_levels=pressure_levels,
+            target_file=target_file,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            input_geo_var_surf_src=input_geo_var_surf_src,
+            input_geo_var_press_src=input_geo_var_press_src,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea,
+            is_classification=is_classification
+        )
+
+    else:  # dataset_type == 'preprocessed' (default)
+        # Preprocessed monthly or weekly data
+        train_dataset = MonthlyERA5Dataset(
+            data_dir=data_dir,
+            years=train_years,
+            time_steps=time_steps,
+            num_time_steps=num_time_steps,  # Fallback for backward compatibility
+            pressure_levels=pressure_levels,
+            target_file=target_file,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea,
+            is_classification=is_classification
+        )
+
+        val_dataset = MonthlyERA5Dataset(
+            data_dir=data_dir,
+            years=val_years,
+            time_steps=time_steps,
+            num_time_steps=num_time_steps,  # Fallback for backward compatibility
+            pressure_levels=pressure_levels,
+            target_file=target_file,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea,
+            is_classification=is_classification
+        )
+
+        test_dataset = MonthlyERA5Dataset(
+            data_dir=data_dir,
+            years=test_years,
+            time_steps=time_steps,
+            num_time_steps=num_time_steps,  # Fallback for backward compatibility
+            pressure_levels=pressure_levels,
+            target_file=target_file,
+            input_geo_var_surf=input_geo_var_surf,
+            input_geo_var_press=input_geo_var_press,
+            include_lat=include_lat,
+            include_lon=include_lon,
+            include_landsea=include_landsea,
+            is_classification=is_classification
+        )
 
     # Create dataloaders
     train_loader = torch.utils.data.DataLoader(

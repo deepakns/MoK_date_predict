@@ -9,6 +9,7 @@ import os
 import pandas as pd
 import numpy as np
 import xarray as xr
+from tqdm import tqdm
 
 def load_mok_data(file_path):
     """
@@ -48,7 +49,7 @@ def preprocess_geoscience_data(netcdf_file, resample_freq='1ME'):
     # e.g., selecting specific variables, time ranges, etc.
 
     var_name = list(ds.data_vars.keys())[0]
-    print(f"Loaded variable: {var_name} from {netcdf_file}")
+    print(f"\n Loaded variable: {var_name} from {netcdf_file}")
 
     # make monthly average on the valid_time dimension
     if resample_freq == '1ME':
@@ -72,31 +73,67 @@ def make_save_monthly_average(root_dir, start_year=1950, end_year=2024):
     """
     folder_names = populate_folder_names()
     folder_names_keys = list(folder_names.keys())
-    
+
     save_dir = os.path.join(root_dir, "monthly")
     os.makedirs(save_dir, exist_ok=True)
-    
+
     for year in range(start_year, end_year):  # Example range of years
         ds_list = []
         for variable_name in folder_names_keys:
             # read netcdf file, preprocess to monthly average, and merge into a single netcdf file, use xarray.merge, have only one ds_monthly for all variables
             file_path = get_variable_file_path(root_dir, variable_name, folder_names)
             netcdf_file = os.path.join(file_path, f"{year}.nc")
-            
+
             # create monthly average for each variable as a separate dataset
             ds_monthly_var = preprocess_geoscience_data(netcdf_file, resample_freq='1ME')
-            
+
             ds_list.append(ds_monthly_var)
             print(f"Processed {variable_name} for year {year}")
 
         # merge all datasets in ds_list into a single dataset
         ds_monthly = xr.concat(ds_list, dim='variables', join='inner', data_vars='minimal')
         print(f"Merged all variables for year {year}")
-        
+
         # save the merged ds_monthly to a netcdf file for that year
         save_file = os.path.join(save_dir, f"{year}_monthly.nc")
         ds_monthly.to_netcdf(save_file)
         print(f"Saved monthly average for year {year} to {save_file}")
+
+    return
+
+def make_save_weekly_average(root_dir, start_year=1950, end_year=2024):
+    """
+    Make and save weekly average of all variables in a single netCDF file.
+
+    Parameters:
+    root_dir (str): The root directory where data is stored.
+    start_year (int): The starting year for processing.
+    end_year (int): The ending year for processing.
+    """
+    folder_names = populate_folder_names()
+    folder_names_keys = list(folder_names.keys())
+
+    save_dir = os.path.join(root_dir, "weekly")
+    os.makedirs(save_dir, exist_ok=True)
+
+    for year in tqdm(range(start_year, end_year), desc="Processing years"):
+        ds_list = []
+        for variable_name in tqdm(folder_names_keys, desc=f"Year {year}", leave=False):
+            # read netcdf file, preprocess to weekly average, and merge into a single netcdf file
+            file_path = get_variable_file_path(root_dir, variable_name, folder_names)
+            netcdf_file = os.path.join(file_path, f"{year}.nc")
+
+            # create weekly average for each variable as a separate dataset
+            ds_weekly_var = preprocess_geoscience_data(netcdf_file, resample_freq='1W')
+
+            ds_list.append(ds_weekly_var)
+
+        # merge all datasets in ds_list into a single dataset
+        ds_weekly = xr.concat(ds_list, dim='variables', join='inner', data_vars='minimal')
+
+        # save the merged ds_weekly to a netcdf file for that year
+        save_file = os.path.join(save_dir, f"{year}.nc")
+        ds_weekly.to_netcdf(save_file)
 
     return 
             

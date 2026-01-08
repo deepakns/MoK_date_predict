@@ -119,7 +119,10 @@ class ReduceLROnPlateauWithRestore:
             self.num_bad_epochs = 0
 
             # Save best states (deep copy to avoid reference issues)
-            self.best_model_state = copy.deepcopy(model.state_dict())
+            # Filter out internal PyTorch keys that start with '_'
+            model_state = model.state_dict()
+            self.best_model_state = {k: v for k, v in model_state.items() if not k.startswith('_')}
+            self.best_model_state = copy.deepcopy(self.best_model_state)
             self.best_optimizer_state = copy.deepcopy(self.optimizer.state_dict())
 
             if self.verbose:

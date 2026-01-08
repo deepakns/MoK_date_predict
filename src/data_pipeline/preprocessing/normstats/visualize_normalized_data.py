@@ -137,7 +137,7 @@ def main():
     parser.add_argument(
         '--config',
         type=str,
-        default='config/model_config.yml',
+        default='config/model_config_with_wandb.yml',
         help='Path to configuration file'
     )
     parser.add_argument(
